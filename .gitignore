@@ -1,0 +1,5 @@
+*.log
+*.tmp
+node-diagnostic-summary-*.txt
+node-diagnostic-*.log
+.DS_Store
