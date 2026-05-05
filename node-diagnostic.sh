@@ -9,7 +9,7 @@
 #   sudo bash node-diagnostic.sh -a        # сразу применить все рекомендованные фиксы
 #   sudo bash node-diagnostic.sh -h        # справка по опциям
 
-SCRIPT_VERSION="3.3"
+SCRIPT_VERSION="3.4"
 set -u
 LANG=C.UTF-8
 
@@ -105,25 +105,36 @@ summary_kv() {
 
 CURL_FLAGS=(--connect-timeout 5 --retry 0 -4)
 
-# Отбивает строку `[N/T] icon Name   tail`
+# Финальная строка проверки (после завершения)
 print_line() {
     local i=$1 total=$2 icon=$3 name=$4 tail=$5
-    printf "\r${CLR_LINE}[%2d/%2d] %b %-26s ${DIM}%s${NC}\n" \
-        "$i" "$total" "$icon" "$name" "$tail"
+    local pct=$(( i * 100 / total ))
+    printf "\r${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} %b %-26s ${DIM}%s${NC}\n" \
+        "$i" "$total" "$pct" "$icon" "$name" "$tail"
 }
 
-# Прогресс «работает» (без перевода строки — обновляется на месте)
+# Прогресс «в работе» — Braille-спиннер, 10 кадров, обновляется ~10 раз/с.
+# Показываем общий % и ETA по среднему времени уже завершённых проверок.
 print_progress() {
-    local i=$1 total=$2 name=$3 elapsed=${4:-}
-    local spin
-    case $(( elapsed % 4 )) in
-        0) spin="◐" ;; 1) spin="◓" ;; 2) spin="◑" ;; 3) spin="◒" ;;
-    esac
-    if [ -n "$elapsed" ] && [ "$elapsed" -ge 1 ]; then
-        printf "\r${CLR_LINE}[%2d/%2d] ${C}%s${NC} %-26s ${DIM}%ds${NC}" \
-            "$i" "$total" "$spin" "$name" "$elapsed"
+    local i=$1 total=$2 name=$3 frame=${4:-0} elapsed=${5:-0}
+    local spin_frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    local spin=${spin_frames[$(( frame % 10 ))]}
+    local pct=$(( (i - 1) * 100 / total ))
+    local eta_str=""
+    if [ "${ETA_AVG:-0}" -gt 0 ] && [ "${i}" -gt 1 ]; then
+        local remaining=$(( (total - i + 1) * ETA_AVG ))
+        if [ "$remaining" -gt 60 ]; then
+            eta_str=" · ETA $(( remaining / 60 ))m $(( remaining % 60 ))s"
+        elif [ "$remaining" -gt 0 ]; then
+            eta_str=" · ETA ${remaining}s"
+        fi
+    fi
+    if [ "$elapsed" -ge 1 ]; then
+        printf "\r${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} ${C}%s${NC} %-26s ${DIM}%ds%s${NC}" \
+            "$i" "$total" "$pct" "$spin" "$name" "$elapsed" "$eta_str"
     else
-        printf "\r${CLR_LINE}[%2d/%2d] ${C}…${NC} %-26s" "$i" "$total" "$name"
+        printf "\r${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} ${C}%s${NC} %-26s${DIM}%s${NC}" \
+            "$i" "$total" "$pct" "$spin" "$name" "$eta_str"
     fi
 }
 
@@ -138,8 +149,12 @@ icon_for() {
     esac
 }
 
-# Запускает функцию проверки в фоне, рисует прогресс, печатает результат
+# Запускает функцию проверки в фоне, рисует плавный прогресс, печатает результат.
+# ETA считаем как (total - done) * average_time_per_check.
 declare -i CHECK_NUM=0
+declare -i CHECK_TOTAL_TIME=0
+declare -i CHECK_DONE=0
+declare -i ETA_AVG=0
 CHECK_TOTAL=0
 
 run_check() {
@@ -157,21 +172,27 @@ run_check() {
     (
         RES_STATUS=ok
         RES_SUMMARY=""
-        # exec stdout/stderr -> log
         exec >> "$LOG" 2>&1
         $fn || true
         printf '%s\n%s\n' "$RES_STATUS" "$RES_SUMMARY" > "$RES_FILE"
     ) &
     local pid=$!
 
-    local start
+    local start frame=0
     start=$(date +%s)
+    # Polling каждые ~100ms — спиннер выглядит живым, не дёрганым
     while kill -0 "$pid" 2>/dev/null; do
         local el=$(( $(date +%s) - start ))
-        print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$el"
-        sleep 1
+        print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$frame" "$el"
+        sleep 0.1
+        frame=$(( frame + 1 ))
     done
     wait "$pid" 2>/dev/null || true
+
+    local dur=$(( $(date +%s) - start ))
+    CHECK_TOTAL_TIME=$(( CHECK_TOTAL_TIME + dur ))
+    CHECK_DONE=$(( CHECK_DONE + 1 ))
+    [ "$CHECK_DONE" -gt 0 ] && ETA_AVG=$(( CHECK_TOTAL_TIME / CHECK_DONE ))
 
     local st="bad" su="(нет результата)"
     if [ -s "$RES_FILE" ]; then
@@ -1587,42 +1608,61 @@ prompt_and_apply_fixes() {
         esac
     done < "$FINDINGS_FILE"
 
-    [ "$f_sysctl" = "1" ] && FIXES+=("sysctl|sysctl tuning|BBR + cake + буферы + tcp_mtu_probing + conntrack")
-    [ "$f_mss"    = "1" ] && FIXES+=("mss|MSS clamp (iptables)|чтоб большие чанки не упирались в Frag-needed")
-    [ "$f_rps"    = "1" ] && FIXES+=("rps|RPS на $DEFAULT_IFACE|размазать softirq по всем CPU")
-    [ "$f_ring"   = "1" ] && FIXES+=("ring|NIC ring buffers up|меньше RX/TX drops под пиками")
+    # формат: key|метка|impact-stars|описание
+    [ "$f_sysctl" = "1" ] && FIXES+=("sysctl|sysctl tuning|★★★|BBR + cake + буферы + tcp_mtu_probing + conntrack")
+    [ "$f_mss"    = "1" ] && FIXES+=("mss|MSS clamp|★★★|iptables TCPMSS — большие чанки не упираются в Frag-needed")
+    [ "$f_rps"    = "1" ] && FIXES+=("rps|RPS на $DEFAULT_IFACE|★★|размазать softirq по всем CPU (балансировка прерываний)")
+    [ "$f_ring"   = "1" ] && FIXES+=("ring|NIC ring buffers|★★|поднять RX/TX до максимума для меньших дропов")
 
     if [ ${#FIXES[@]} -eq 0 ]; then
         echo
-        echo -e "${G}  Релевантных фиксов нет — нода уже настроена.${NC}"
+        echo -e "${DIM}  ─────────────────────────────────  ФИКСЫ  ─────────────────────────────────${NC}"
+        echo
+        echo -e "  ${G}${BOLD}✓ Релевантных фиксов нет${NC} ${DIM}— нода уже настроена оптимально${NC}"
+        echo
         return
     fi
 
     echo
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ФИКСЫ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${DIM}  ─────────────────────────────────  ФИКСЫ  ─────────────────────────────────${NC}"
     echo
-    echo -e "${BOLD}  ▼ Доступные фиксы:${NC}"
+    echo -e "  ${BOLD}Доступно ${#FIXES[@]} ${NC}${DIM}рекомендованных исправлений${NC} ${DIM}(★ = ожидаемый импакт)${NC}"
+    echo
     for i in "${!FIXES[@]}"; do
         local entry=${FIXES[$i]}
-        local label=$(echo "$entry" | cut -d'|' -f2)
-        local desc=$(echo  "$entry" | cut -d'|' -f3)
-        printf "    ${BOLD}[%d]${NC} %-25s ${DIM}%s${NC}\n" $((i+1)) "$label" "$desc"
+        local label=$(echo  "$entry" | cut -d'|' -f2)
+        local stars=$(echo  "$entry" | cut -d'|' -f3)
+        local desc=$(echo   "$entry" | cut -d'|' -f4)
+        local clen pad
+        clen=$(printf '%s' "$label" | wc -m)
+        pad=$(( 22 - clen ))
+        [ "$pad" -lt 0 ] && pad=0
+        printf "    ${C}${BOLD}[%d]${NC} ${BOLD}%s${NC}%*s ${Y}%-3s${NC} ${DIM}%s${NC}\n" \
+            $((i+1)) "$label" "$pad" "" "$stars" "$desc"
     done
+    echo
+    echo -e "    ${DIM}Перед применением будет создан backup настроек в $BACKUP_DIR${NC}"
     echo
 
     local answer="all"
     if [ "$APPLY_MODE" = "prompt" ]; then
         if [ ! -t 0 ]; then
-            echo -e "${DIM}  (не TTY, для применения запусти с -a/--apply-all)${NC}"
+            echo -e "${DIM}  (не TTY — запусти с -a для авто-применения)${NC}"
+            echo
             return
         fi
-        echo -ne "${BOLD}  Применить? ${DIM}(номера через запятую, например 1,3 / all / none)${NC}${BOLD} [none]:${NC} "
+        printf "  ${BOLD}Применить?${NC} ${DIM}[номера через запятую / all / none]${NC} ${BOLD}[none]${NC}: "
         read -r answer
         answer=${answer,,}
         [ -z "$answer" ] && answer="none"
     fi
 
-    [ "$answer" = "none" ] && { echo "  пропустил."; return; }
+    if [ "$answer" = "none" ]; then
+        echo
+        echo -e "  ${DIM}Пропущено — ничего не применено${NC}"
+        echo
+        return
+    fi
 
     declare -a TO_APPLY=()
     if [ "$answer" = "all" ]; then
@@ -1638,15 +1678,25 @@ prompt_and_apply_fixes() {
             fi
         done
     fi
-    [ ${#TO_APPLY[@]} -eq 0 ] && { echo "  ничего не выбрано."; return; }
+    if [ ${#TO_APPLY[@]} -eq 0 ]; then
+        echo
+        echo -e "  ${Y}ничего не выбрано${NC}"
+        echo
+        return
+    fi
 
     echo
-    [ "$DRY_RUN" = "1" ] && echo -e "${Y}  ▶ DRY-RUN: ничего реально не применяется${NC}"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo -e "  ${Y}${BOLD}▶ DRY-RUN${NC} ${DIM}— показываю команды, не применяю${NC}"
+        echo
+    fi
+    local applied_n=0
     for entry in "${TO_APPLY[@]}"; do
         local key label
-        key=$(echo "$entry"   | cut -d'|' -f1)
+        key=$(echo   "$entry" | cut -d'|' -f1)
         label=$(echo "$entry" | cut -d'|' -f2)
-        echo -e "${C}${BOLD}  ▶ $label${NC}"
+        applied_n=$((applied_n + 1))
+        echo -e "  ${C}${BOLD}▶${NC} ${BOLD}[$applied_n/${#TO_APPLY[@]}]${NC} ${BOLD}$label${NC}"
         case "$key" in
             sysctl) fix_sysctl ;;
             mss)    fix_mss_clamp ;;
@@ -1656,9 +1706,9 @@ prompt_and_apply_fixes() {
         echo
     done
 
-    echo -e "${G}${BOLD}  Готово.${NC}"
-    [ -f "$FIX_LOG" ] && echo -e "  ${DIM}История применённых фиксов: $FIX_LOG${NC}"
-    echo -e "  ${DIM}Перезапусти диагностику чтобы убедиться, что проблемы ушли.${NC}"
+    echo -e "  ${G}${BOLD}┃${NC}  ${G}${BOLD}✓ Готово${NC} ${DIM}—${NC} применил ${BOLD}${applied_n}${NC} ${DIM}фикс(ов)${NC}"
+    echo -e "  ${G}${BOLD}┃${NC}  ${DIM}Перепроверить эффект:${NC} ${BOLD}sudo bash $0 -q${NC}"
+    echo
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -1667,14 +1717,14 @@ prompt_and_apply_fixes() {
 
 # Header
 echo
-echo -e "${C}${BOLD}╔═════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${C}${BOLD}║   Node Diagnostic v${SCRIPT_VERSION} · $(date -u +'%Y-%m-%d %H:%M UTC')                            ║${NC}"
-echo -e "${C}${BOLD}╚═════════════════════════════════════════════════════════════════════╝${NC}"
+echo -e "  ${C}${BOLD}NODE DIAGNOSTIC${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
+echo -e "  ${DIM}─────────────────────────────────────────────────────${NC}"
+echo -e "  ${DIM}$(date -u +'%Y-%m-%d %H:%M UTC') · $(hostname)${NC}"
 echo
 
-echo -ne "${DIM}Ставлю недостающие пакеты…${NC}"
+echo -ne "  ${DIM}Ставлю недостающие пакеты…${NC}"
 ensure_deps >>"$LOG" 2>&1
-echo -e "\r${CLR_LINE}${DIM}Лог: $LOG${NC}"
+echo -e "\r${CLR_LINE}  ${DIM}Лог: $LOG${NC}"
 echo
 
 # Глобальные значения для фиксов (нужны вне subshell'ов)
@@ -1743,7 +1793,8 @@ echo
 
 DIAG_START=$(date +%s)
 for entry in "${EFFECTIVE_CHECKS[@]}"; do
-    name=${entry%%:*}
+    # name может содержать ":" (напр. "Speed: 1-flow"), поэтому % не %%
+    name=${entry%:*}
     fn=${entry##*:}
     run_check "$name" "$fn"
 done
@@ -1752,120 +1803,161 @@ DIAG_DURATION=$(( $(date +%s) - DIAG_START ))
 # Покажем пропущенные одной строкой в конце
 if [ ${#SKIPPED_CHECKS[@]} -gt 0 ]; then
     echo
-    echo -e "${DIM}Пропущено: ${#SKIPPED_CHECKS[@]} проверок${NC}"
+    echo -e "  ${DIM}пропущено ${#SKIPPED_CHECKS[@]} проверок:${NC}"
     for skip in "${SKIPPED_CHECKS[@]}"; do
-        local_name=${skip%%:*}
-        local_reason=${skip##*|}
-        printf "  ${DIM}· %-26s %s${NC}\n" "$local_name" "$local_reason"
+        # формат: "name:fn|reason" — name может содержать ":"
+        skip_entry=${skip%|*}
+        skip_reason=${skip##*|}
+        skip_name=${skip_entry%:*}
+        printf "  ${DIM}  · %-26s %s${NC}\n" "$skip_name" "$skip_reason"
     done
 fi
-echo -e "${DIM}Длительность: ${DIAG_DURATION}s${NC}"
+echo
+echo -e "  ${DIM}прогон занял ${DIAG_DURATION}s${NC}"
 
 # ════════════════════════════════════════════════════════════════════
 # СВОДКА
 # ════════════════════════════════════════════════════════════════════
-echo
-echo -e "${C}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ СВОДКА ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-# Считаем оценку
-total_checks=$CHECK_TOTAL
-ok_count=0; warn_count=0; bad_count=0; skip_count=0
-score=0
-# Нам нужно перечитать статусы из FINDINGS — лучше их собирать в run_check, но сейчас
-# просто посчитаем по вердиктам через прокси (сами FINDINGS содержат severity).
-# Грубая метрика: каждый bad findings — −2, warn — −1.
-penalty=0
+# Категоризация ключей сводки (мап имени → раздел)
+classify_kv() {
+    case "$1" in
+        Хост|IP|"Гео по базам"|"Гео по latency"|ASN|Ядро|CPU|RAM|NIC|Туннели|Xray)  echo sys ;;
+        "TCP CC"|"TCP tuning"|Conntrack|DNS|PMTU|"Loss до Google"|"Маршрут"|QUIC/HTTP3|IPv6) echo net ;;
+        "Speed (1-flow)"|"Speed (4-flow)"|"CDN speed"|Bufferbloat|"Variance (5x)"|"TCP retrans") echo perf ;;
+        "Сервисы"|"Cloudflare colo"|"Reverse DNS") echo svc ;;
+        *) echo other ;;
+    esac
+}
+
+# Считаем оценку: bad → -3, warn → -1
+ok_count=0; warn_count=0; bad_count=0; info_count=0; penalty=0
 while IFS='|' read -r sev tag msg; do
     case "$sev" in
         3) bad_count=$((bad_count+1));   penalty=$((penalty + 3)) ;;
         2) warn_count=$((warn_count+1)); penalty=$((penalty + 1)) ;;
-        1) ;; # info
+        1) info_count=$((info_count+1)) ;;
     esac
 done < "$FINDINGS_FILE"
-
-# Score 0..100, начиная со 100, штраф penalty
 score=$(( 100 - penalty * 5 ))
 [ "$score" -lt 0 ] && score=0
 
-# Краткие пары — пэддинг по реальным символам (Cyrillic = 2 bytes/char)
-echo
-print_summary_kv() {
+# Хелперы для рендера
+print_section_header() {
+    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}$1${NC}"
+}
+
+print_kv_aligned() {
     local k="$1" v="$2"
     local clen pad
     clen=$(printf '%s' "$k" | wc -m)
-    pad=$(( 22 - clen ))
+    pad=$(( 18 - clen ))
     [ "$pad" -lt 0 ] && pad=0
-    printf "  ${DIM}%s%*s${NC} %s\n" "$k" "$pad" "" "$v"
+    printf "    ${DIM}%s%*s${NC}  %s\n" "$k" "$pad" "" "$v"
 }
-while IFS='|' read -r k v; do
-    print_summary_kv "$k" "$v"
-done < "$SUMMARY_FILE"
+
+# Score-gauge: 20-сегментный бар с цветом по диапазону
+print_score_gauge() {
+    local s=$1
+    local filled=$(( s * 20 / 100 ))
+    [ "$filled" -gt 20 ] && filled=20
+    local empty=$(( 20 - filled ))
+    local color
+    if   [ "$s" -ge 80 ]; then color=$G
+    elif [ "$s" -ge 50 ]; then color=$Y
+    else                       color=$R
+    fi
+    local bar=""
+    local i
+    for ((i=0; i<filled; i++)); do bar="${bar}█"; done
+    for ((i=0; i<empty;  i++)); do bar="${bar}░"; done
+    printf "  %sScore%s  ${color}%s${NC}  ${BOLD}%3d${NC}${DIM}/100${NC}" \
+        "$BOLD" "$NC" "$bar" "$s"
+}
+
+# Заголовок раздела
+echo
+echo -e "${DIM}  ─────────────────────────────────  СВОДКА  ─────────────────────────────────${NC}"
+echo
+
+# Группируем сводку по категориям
+section_started=""
+print_category() {
+    local cat=$1 title=$2
+    local has_keys=0
+    while IFS='|' read -r k v; do
+        if [ "$(classify_kv "$k")" = "$cat" ]; then
+            if [ "$has_keys" = "0" ]; then
+                [ -n "$section_started" ] && echo
+                print_section_header "$title"
+                has_keys=1
+                section_started=1
+            fi
+            print_kv_aligned "$k" "$v"
+        fi
+    done < "$SUMMARY_FILE"
+}
+print_category sys  "Система"
+print_category net  "Сеть"
+print_category perf "Производительность"
+print_category svc  "Сервисы и репутация"
+
+# Score gauge + verdict
+echo
+echo
+print_score_gauge "$score"
+echo
 echo
 
 # Вердикт
+verdict_icon=""; verdict_color=""; verdict_text=""; verdict_sub=""
 if [ "$bad_count" = "0" ] && [ "$warn_count" = "0" ]; then
-    echo -e "${G}${BOLD}  ВЕРДИКТ: нода ОК · score $score/100${NC}"
-    echo -e "  Шортсы должны грузиться без проблем."
+    verdict_icon="✓"; verdict_color=$G
+    verdict_text="нода в порядке"
+    verdict_sub="видео и сервисы должны работать без проблем"
 elif [ "$bad_count" = "0" ]; then
-    echo -e "${Y}${BOLD}  ВЕРДИКТ: рабочее с замечаниями · score $score/100${NC}"
-    echo -e "  $warn_count предупреждений. Шортсы поедут, но не идеально."
+    verdict_icon="⚠"; verdict_color=$Y
+    verdict_text="рабочее с замечаниями"
+    verdict_sub="$warn_count предупреждений · поедет, но не идеально"
 elif [ "$bad_count" -le 1 ]; then
-    echo -e "${Y}${BOLD}  ВЕРДИКТ: проблемы есть · score $score/100${NC}"
-    echo -e "  $bad_count критичных + $warn_count предупреждений. Видео будет залипать."
+    verdict_icon="⚠"; verdict_color=$Y
+    verdict_text="проблемы есть"
+    verdict_sub="$bad_count критичных + $warn_count предупреждений"
 else
-    echo -e "${R}${BOLD}  ВЕРДИКТ: нода непригодна для видео · score $score/100${NC}"
-    echo -e "  $bad_count критичных проблем + $warn_count предупреждений."
+    verdict_icon="✗"; verdict_color=$R
+    verdict_text="непригодна для видео"
+    verdict_sub="$bad_count критичных + $warn_count предупреждений"
+fi
+echo -e "  ${verdict_color}${BOLD}${verdict_icon}  ${verdict_text}${NC}"
+echo -e "     ${DIM}${verdict_sub}${NC}"
+echo
+
+# Если главная причина — пиринг ASN, отдельная подсветка
+if grep -q -E '^3\|(loss|route)\|' "$FINDINGS_FILE"; then
+    echo -e "  ${R}${BOLD}┃${NC}  ${R}${BOLD}ОСНОВНАЯ ПРИЧИНА${NC} ${DIM}—${NC} битый пиринг провайдера"
+    echo -e "  ${R}${BOLD}┃${NC}  ${DIM}потери на маршруте к Google. sysctl тут НЕ помогает.${NC}"
+    echo -e "  ${R}${BOLD}┃${NC}  ${DIM}решение — смена хостинга на другой ASN.${NC}"
+    echo
 fi
 
-# Главные проблемы (sorted by severity desc)
+# Findings, сгруппированные по severity
 if [ -s "$FINDINGS_FILE" ]; then
-    echo
-    echo -e "${BOLD}  ▼ Найденные проблемы (по приоритету):${NC}"
-    sort -t'|' -k1 -rn "$FINDINGS_FILE" | while IFS='|' read -r sev tag msg; do
-        local_icon=""
-        case "$sev" in
-            3) local_icon="${R}✗${NC}" ;;
-            2) local_icon="${Y}⚠${NC}" ;;
-            1) local_icon="${B}·${NC}" ;;
-        esac
-        echo -e "    $local_icon ${DIM}[${tag}]${NC} $msg"
-    done
-fi
-
-# Готовые фиксы
-if [ "$bad_count" -gt 0 ] || [ "$warn_count" -gt 0 ]; then
-    echo
-    echo -e "${BOLD}  ▼ Быстрые фиксы (можно скопировать целиком):${NC}"
-    cat <<'FIX'
-
-  cat > /etc/sysctl.d/99-vpn-tuning.conf <<'EOF'
-  net.core.default_qdisc = cake
-  net.ipv4.tcp_congestion_control = bbr
-  net.ipv4.tcp_mtu_probing = 1
-  net.ipv4.tcp_slow_start_after_idle = 0
-  net.ipv4.tcp_notsent_lowat = 131072
-  net.ipv4.tcp_fastopen = 3
-  net.core.rmem_max = 67108864
-  net.core.wmem_max = 67108864
-  net.ipv4.tcp_rmem = 4096 87380 67108864
-  net.ipv4.tcp_wmem = 4096 65536 67108864
-  net.core.netdev_max_backlog = 16384
-  net.core.somaxconn = 8192
-  net.ipv4.tcp_max_syn_backlog = 8192
-  net.netfilter.nf_conntrack_max = 524288
-  EOF
-  sysctl --system
-
-  # MSS clamp (если PMTU < 1500)
-  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-  iptables -t mangle -A OUTPUT  -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-FIX
-
-    if grep -q '^3|loss\|^3|route' "$FINDINGS_FILE"; then
+    print_findings_group() {
+        local sev=$1 title=$2 color=$3 icon=$4
+        local count
+        count=$(awk -F'|' -v s="$sev" '$1 == s' "$FINDINGS_FILE" | wc -l)
+        [ "$count" -eq 0 ] && return
+        echo -e "  ${color}${BOLD}▌${NC} ${BOLD}$title${NC} ${DIM}($count)${NC}"
+        awk -F'|' -v s="$sev" '$1 == s {print $2 "|" $3}' "$FINDINGS_FILE" | while IFS='|' read -r tag msg; do
+            local pad_tag
+            pad_tag=$(printf '%-12s' "[$tag]")
+            echo -e "    ${color}${icon}${NC} ${DIM}${pad_tag}${NC} ${msg}"
+        done
         echo
-        echo -e "${R}${BOLD}  ⚠ Главная причина — плохой пиринг ASN${NC}"
-        echo -e "  ${DIM}sysctl-настройки тут НЕ помогут. Только смена хостинга.${NC}"
-    fi
+    }
+    print_findings_group 3 "Критичные"     "$R" "✗"
+    print_findings_group 2 "Предупреждения" "$Y" "⚠"
+    print_findings_group 1 "Информация"    "$B" "·"
 fi
 
 prompt_and_apply_fixes
@@ -1908,19 +2000,29 @@ SUMMARY_TXT="/tmp/node-diagnostic-summary-$(date +%Y%m%d-%H%M%S).txt"
     fi
 } > "$SUMMARY_TXT"
 
-# Финальное напоминание про откат, если что-то применили
+echo
+echo -e "${DIM}  ─────────────────────────────────  ИТОГО  ─────────────────────────────────${NC}"
+echo
+
+# Артефакты — компактным списком с иконками
+printf "  ${DIM}%-12s${NC} %s\n" "Полный лог" "$LOG"
+printf "  ${DIM}%-12s${NC} %s\n" "Сводка"     "$SUMMARY_TXT"
 if [ "${BACKUP_DONE:-0}" = "1" ]; then
+    printf "  ${DIM}%-12s${NC} %s\n" "Backup" "$BACKUP_DIR/*-${BACKUP_TS}.*"
+fi
+echo
+
+# Откат — только если что-то реально применили
+if [ "${BACKUP_DONE:-0}" = "1" ]; then
+    echo -e "  ${DIM}${BOLD}⤺  Откат фиксов:${NC}"
+    echo -e "  ${DIM}    rm /etc/sysctl.d/99-vpn-tuning.conf 2>/dev/null${NC}"
+    echo -e "  ${DIM}    iptables -t mangle -F FORWARD; iptables -t mangle -F OUTPUT${NC}"
+    echo -e "  ${DIM}    systemctl disable --now vpn-rps.service vpn-ring.service 2>/dev/null${NC}"
+    echo -e "  ${DIM}    sysctl --system   ${DIM}# или восстановить из $BACKUP_DIR/sysctl-${BACKUP_TS}.txt${NC}"
     echo
-    echo -e "${DIM}  ⤺ Откат фиксов:${NC}"
-    echo -e "${DIM}     rm /etc/sysctl.d/99-vpn-tuning.conf  /etc/sysctl.d/98-swappiness.conf 2>/dev/null${NC}"
-    echo -e "${DIM}     iptables -t mangle -F FORWARD; iptables -t mangle -F OUTPUT${NC}"
-    echo -e "${DIM}     systemctl disable --now vpn-rps.service vpn-ring.service 2>/dev/null${NC}"
-    echo -e "${DIM}     sysctl --system${NC}"
-    echo -e "${DIM}     # либо восстановить из $BACKUP_DIR/sysctl-${BACKUP_TS}.txt${NC}"
 fi
 
-echo
-echo -e "${DIM}  Полный лог:  $LOG${NC}"
-echo -e "${DIM}  Сводка:      $SUMMARY_TXT${NC}"
-echo -e "${DIM}  Длительность: ${DIAG_DURATION}s · v$SCRIPT_VERSION${NC}"
+# Подвал с метаданными прогона
+printf "  ${DIM}%s · %ds · %d/%d проверок · v%s${NC}\n" \
+    "$(date +'%H:%M:%S')" "$DIAG_DURATION" "$CHECK_TOTAL" "${#CHECKS[@]}" "$SCRIPT_VERSION"
 echo
