@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # legacy-движок: часть переменных зарезервирована / читается кросс-модульно
 # modules/diagnose.sh — диагностика VPN/Linux-ноды для YouTube, видео-CDN и популярных сервисов.
 # Компактный дашборд: прогресс-бар → сводка → вердикт → рекомендации по модулям.
 # Только диагностика; применение фиксов — modules/optimize.sh / protect.sh / bbr3.sh (или меню node-diagnostic.sh).
@@ -31,10 +32,12 @@ APPLY_MODE="prompt"   # prompt | all | none
 DRY_RUN=0
 QUICK=0
 NO_NET=0
+JSON=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -v|--verbose)         VERBOSE=1 ;;
         -q|--quick)           QUICK=1 ;;
+        --json)               JSON=1 ;;
         -a|--apply-all|--yes) : ;;   # deprecated: фиксы теперь в modules/optimize.sh
         -n|--no-fixes)        : ;;   # deprecated (no-op)
         --dry-run)            : ;;   # deprecated (no-op)
@@ -47,6 +50,7 @@ node-diagnostic.sh v$SCRIPT_VERSION — диагностика VPN/Linux-нод�
 Опции:
   -q, --quick        Пропустить долгие тесты (mtr/4-flow/multi-CDN/services/variance/bufferbloat)
   -v, --verbose      Старый детальный режим (всё на экран)
+      --json         Машиночитаемый JSON на stdout (score+summary+findings; для флота)
       --no-net       Без сетевых тестов (только локальная конфигурация)
       --version      Показать версию и выйти
   -h, --help         Эта справка
@@ -68,8 +72,16 @@ done
 
 LOG="/tmp/node-diagnostic-$(date +%Y%m%d-%H%M%S).log"
 RES_FILE=$(mktemp)
-FINDINGS_FILE="${FINDINGS_FILE:-$(mktemp)}"
 SUMMARY_FILE=$(mktemp)
+# findings — общий с модулями (optimize --from-findings): стабильный путь, переживает выход.
+if [ "$(id -u)" -eq 0 ]; then : "${ND_STATE_DIR:=/run/node-diagnostic}"
+else : "${ND_STATE_DIR:=${TMPDIR:-/tmp}/node-diagnostic-$(id -u)}"; fi
+mkdir -p "$ND_STATE_DIR" 2>/dev/null || ND_STATE_DIR=$(mktemp -d)
+FINDINGS_FILE="${FINDINGS_FILE:-$ND_STATE_DIR/findings}"
+: > "$FINDINGS_FILE" 2>/dev/null || FINDINGS_FILE=$(mktemp)   # свежий на каждый прогон
+
+# --json: весь человекочитаемый вывод — в лог, на stdout в конце только JSON (для агрегации по флоту)
+if [ "$JSON" = "1" ]; then exec 3>&1 1>>"$LOG" 2>&1; fi
 
 # ────────────────────────────────────────────────────────────────────
 # Хелперы
@@ -81,7 +93,8 @@ cleanup() {
     local pids
     pids=$(jobs -p 2>/dev/null)
     [ -n "$pids" ] && kill $pids 2>/dev/null || true
-    rm -f "$RES_FILE" "$FINDINGS_FILE" "$SUMMARY_FILE"
+    # FINDINGS_FILE НЕ удаляем — его читает optimize --from-findings
+    rm -f "$RES_FILE" "$SUMMARY_FILE"
 }
 trap cleanup EXIT
 
@@ -687,6 +700,7 @@ check_pmtu() {
     pmtu_probe() {
         local size=$1 target=${2:-1.1.1.1}
         local recv
+        # shellcheck disable=SC1010  # 'do' здесь — аргумент ping -M (pmtudisc), не ключевое слово
         recv=$(ping -M do -s "$size" -c 3 -W 2 "$target" 2>/dev/null | awk '/packets transmitted/ {print $4}')
         [ "${recv:-0}" -ge 1 ]
     }
@@ -1721,3 +1735,31 @@ fi
 printf "  ${DIM}%s · %ds · %d/%d проверок · v%s${NC}\n" \
     "$(date +'%H:%M:%S')" "$DIAG_DURATION" "$CHECK_TOTAL" "${#CHECKS[@]}" "$SCRIPT_VERSION"
 echo
+
+# ─── JSON-вывод для агрегации по флоту (экранирование чистым bash, без awk-квирков) ───
+json_escape() { local s=$1 bs='\'; s=${s//"$bs"/"$bs$bs"}; s=${s//'"'/'\"'}; printf '%s' "$s"; }
+emit_json() {
+    local score_val="${1:-0}" host ts kv="" findings="" k v sev tag msg sname first
+    host=$(hostname 2>/dev/null)
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    first=1
+    while IFS='|' read -r k v; do
+        [ -z "$k" ] && continue
+        [ "$first" -eq 1 ] && first=0 || kv+=","
+        kv+="\"$(json_escape "$k")\":\"$(json_escape "$v")\""
+    done < "$SUMMARY_FILE"
+    first=1
+    while IFS='|' read -r sev tag msg; do
+        [ -z "$sev" ] && continue
+        case "$sev" in 2) sname=warn ;; 3) sname=crit ;; *) sname=info ;; esac
+        [ "$first" -eq 1 ] && first=0 || findings+=","
+        findings+="{\"sev\":\"$sname\",\"tag\":\"$(json_escape "$tag")\",\"msg\":\"$(json_escape "$msg")\"}"
+    done < "$FINDINGS_FILE"
+    printf '{"version":"%s","host":"%s","ts":"%s","score":%s,"summary":{%s},"findings":[%s]}\n' \
+        "$SCRIPT_VERSION" "$(json_escape "$host")" "$ts" "$score_val" "$kv" "$findings"
+}
+
+if [ "$JSON" = "1" ]; then
+    exec 1>&3
+    emit_json "${score:-0}"
+fi

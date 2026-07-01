@@ -42,7 +42,15 @@ modules/
 
 ## Установка
 
-Тулкит модульный — нужен весь репозиторий:
+**Одной командой:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Case211/node-diagnostic/main/install.sh | sudo bash
+```
+
+Скачивает репозиторий в `/opt/node-diagnostic`; в терминале сразу открывает меню. Переопределяемо через env: `ND_REF` (ветка/тег), `ND_DEST` (каталог).
+
+**Или вручную** (тулкит модульный — нужен весь репозиторий):
 
 ```bash
 git clone https://github.com/Case211/node-diagnostic
@@ -57,12 +65,16 @@ sudo bash node-diagnostic.sh        # интерактивное меню
 ```bash
 sudo bash node-diagnostic.sh                       # меню (диагностика, если ввод не TTY)
 sudo bash node-diagnostic.sh diagnose -q           # быстрая диагностика ~1 мин
+sudo bash node-diagnostic.sh diagnose --json       # машиночитаемый JSON (для агрегации по флоту)
 sudo bash node-diagnostic.sh optimize --all        # весь тюнинг
+sudo bash node-diagnostic.sh optimize --from-findings   # только фиксы по находкам диагностики
 sudo bash node-diagnostic.sh optimize --dry-run    # показать, что применил бы
 sudo bash node-diagnostic.sh protect --panel-ip 1.2.3.4 --node-port 2222
-sudo bash node-diagnostic.sh bbr3 --install        # XanMod (нужен reboot)
+sudo bash node-diagnostic.sh bbr3 --install        # XanMod (нужен reboot); --level 2 если CPU маскирован
 sudo bash node-diagnostic.sh rollback              # откат оптимизаций
 ```
+
+Типовой поток: `diagnose` → он сохраняет находки → `optimize --from-findings` применяет только релевантное. Для флота: `diagnose --json` на каждой ноде, сводишь в одну картину.
 
 Каждый модуль запускается и самостоятельно: `sudo bash modules/optimize.sh --sysctl`.
 
@@ -132,11 +144,13 @@ sudo bash node-diagnostic.sh rollback --dry-run  # показать, что сн
 
 ## Требования
 
-- Linux (Ubuntu/Debian/RHEL/Fedora/Alpine), bash 4+
-- root — для `optimize`/`protect`/`bbr3`/`rollback` (диагностика работает и без root, часть проверок пропускается)
-- `bbr3` — только bare-metal/KVM x86_64 (не контейнер)
+- bash 4+, root для `optimize`/`protect`/`bbr3`/`rollback` (диагностика работает и без root, часть проверок пропускается).
+- Поддержка дистрибутивов по модулям:
+  - `diagnose`, `optimize`, `rollback` — Ubuntu/Debian/RHEL/Fedora/Alpine (sysctl универсален; deps ставятся через apt/dnf/yum/apk).
+  - `protect` — firewall на nftables/ufw универсален; инструкции по fail2ban в `APPLY.txt` даны под apt (для dnf/apk — аналогично).
+  - `bbr3` — **только Debian/Ubuntu** (XanMod = deb-репозиторий) и **только bare-metal/KVM x86_64** (не контейнер).
 
-Диагностика тестировалась на Ubuntu 22.04, Debian 12, Alpine 3.18.
+Диагностика тестировалась на Ubuntu 22.04, Debian 12, Alpine 3.18. CI гоняет shellcheck + smoke на Ubuntu/Debian.
 
 ## Лицензия
 

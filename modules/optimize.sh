@@ -30,14 +30,30 @@ _ct_max() {
 
 # ── 1. sysctl: congestion, PMTU, буферы, очереди, SYN/anti-spoof, TIME_WAIT ──
 opt_sysctl() {
-    local sock_max ct_max udp="${ND_UDP_TUNE:-1}"
+    local sock_max ct_max cc="bbr" qdisc="cake"
     sock_max=$(_sock_max); ct_max=$(_ct_max)
-    echo -e "  ${BOLD}sysctl tuning${NC} ${DIM}(RAM=$(( $(_mem_kb)/1024 ))M → буферы $((sock_max/1024/1024))M, conntrack $ct_max)${NC}"
+
+    # модули: без tcp_bbr cc не переключится, без nf_conntrack ключи net.netfilter.* не существуют
+    load_module tcp_bbr
+    load_module nf_conntrack
+    load_module sch_cake
+
+    # выбираем congestion control / qdisc по РЕАЛЬНОЙ доступности, а не вслепую
+    if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+        cc="cubic"
+        msg_warn "BBR недоступен в ядре — ставлю cc=cubic. Для BBR(v3) поставь ядро: bbr3.sh --install"
+    fi
+    if ! module_available sch_cake; then
+        qdisc="fq"
+        msg_info "sch_cake недоступен — qdisc=fq"
+    fi
+
+    echo -e "  ${BOLD}sysctl tuning${NC} ${DIM}(RAM=$(( $(_mem_kb)/1024 ))M → буферы $((sock_max/1024/1024))M · conntrack $ct_max · cc=$cc · qdisc=$qdisc)${NC}"
 
     write_dropin tuning <<EOF
 # Congestion control + qdisc
-net.core.default_qdisc = cake
-net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = $qdisc
+net.ipv4.tcp_congestion_control = $cc
 
 # PMTU / MSS — tcp_mtu_probing без пола MSS = коллапс до 48б на лоссовом плече
 net.ipv4.tcp_mtu_probing = 1
@@ -93,7 +109,16 @@ net.ipv6.conf.all.accept_source_route = 0
 net.netfilter.nf_conntrack_max = $ct_max
 net.netfilter.nf_conntrack_tcp_timeout_established = 7440
 EOF
-    [ "$udp" = "1" ] || msg_info "UDP-буферы включены по умолчанию (для Hysteria2/TUIC/QUIC-инбаундов)"
+
+    # verify-after: подтверждаем, что критичное реально применилось (ключ мог отсутствовать/не иметь модуля)
+    if [ "$DRY_RUN" != "1" ]; then
+        local bad=0
+        verify_sysctl net.ipv4.tcp_congestion_control "$cc"    || { bad=1; msg_warn "cc=$cc не применился"; }
+        verify_sysctl net.core.default_qdisc "$qdisc"          || { bad=1; msg_warn "qdisc=$qdisc не применился"; }
+        verify_sysctl net.ipv4.tcp_min_snd_mss 512             || { bad=1; msg_warn "tcp_min_snd_mss не применился"; }
+        verify_sysctl net.netfilter.nf_conntrack_max "$ct_max" || msg_warn "nf_conntrack_max не применился (модуль nf_conntrack не загружен?)"
+        [ "$bad" = "0" ] && msg_ok "ключевые значения подтверждены (cc / qdisc / tcp_min_snd_mss)"
+    fi
 }
 
 # ── 2. FD-лимиты (xray упирается в дескрипторы; sysctl + limits + systemd + pam) ──
@@ -212,6 +237,8 @@ UNIT
 opt_mss_clamp() {
     have iptables || { msg_warn "нет iptables — пропускаю MSS clamp"; return 0; }
     echo -e "  ${BOLD}MSS clamp${NC} ${DIM}iptables TCPMSS --clamp-mss-to-pmtu (FORWARD/OUTPUT)${NC}"
+    # SYN,RST — маска флагов iptables (один аргумент), не разделитель массива
+    # shellcheck disable=SC2054
     local rule_args=(-p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu)
     local chain
     for chain in FORWARD OUTPUT; do
@@ -248,14 +275,44 @@ opt_all() {
     opt_nic;      echo
     opt_mss_clamp; echo
     opt_swappiness; echo
-    echo -e "  ${G}${BOLD}✓ Оптимизация применена.${NC} ${DIM}Проверить: sudo bash node-diagnostic.sh --diagnose. Откат: modules/rollback.sh${NC}"
+    echo -e "  ${G}${BOLD}✓ Оптимизация применена.${NC} ${DIM}Проверить: sudo bash node-diagnostic.sh diagnose. Откат: rollback${NC}"
+}
+
+# применить только фиксы, релевантные находкам diagnose (общий FINDINGS_FILE)
+opt_from_findings() {
+    [ "$DRY_RUN" = "1" ] || need_root || die "нужен root."
+    local ff="${FINDINGS_FILE:-}"
+    if [ -z "$ff" ] || [ ! -s "$ff" ]; then
+        msg_warn "findings пуст/нет (${ff:-не задан}). Сначала: node-diagnostic.sh diagnose"
+        return 0
+    fi
+    local s=0 mss=0 rps=0 nic=0 tag msg
+    while IFS='|' read -r _ tag msg; do
+        case "$tag" in
+            tcp|conntrack|bufferbloat) s=1 ;;
+            pmtu)                      s=1; mss=1 ;;
+            cpu) echo "$msg" | grep -qi softirq && rps=1 ;;
+            nic) echo "$msg" | grep -qi drop && nic=1 ;;
+        esac
+    done < "$ff"
+    if [ $((s+mss+rps+nic)) -eq 0 ]; then
+        msg_ok "по находкам релевантных фиксов нет — нода уже настроена"
+        return 0
+    fi
+    echo -e "  ${BOLD}Фиксы по находкам диагностики${NC}"; echo
+    [ "$s" = "1" ]   && { opt_sysctl; echo; opt_fd_limits; echo; }
+    [ "$mss" = "1" ] && { opt_mss_clamp; echo; }
+    [ "$rps" = "1" ] && { opt_rps; echo; }
+    [ "$nic" = "1" ] && { opt_nic; echo; }
+    echo -e "  ${G}${BOLD}✓ Применены фиксы по находкам.${NC} ${DIM}Откат: rollback${NC}"
 }
 
 opt_main() {
-    local do_all=1 s=0 l=0 r=0 nic=0 mss=0 sw=0
+    local do_all=1 ff=0 s=0 l=0 r=0 nic=0 mss=0 sw=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --all)     do_all=1 ;;
+            --all)           do_all=1 ;;
+            --from-findings) do_all=0; ff=1 ;;
             --sysctl)  do_all=0; s=1 ;;
             --limits)  do_all=0; l=1 ;;
             --rps)     do_all=0; r=1 ;;
@@ -268,6 +325,7 @@ opt_main() {
         shift
     done
     if [ "$do_all" = "1" ]; then opt_all; return; fi
+    if [ "$ff" = "1" ]; then opt_from_findings; return; fi
     [ "$DRY_RUN" = "1" ] || need_root || die "нужен root."
     [ "$s" = "1" ]   && { opt_sysctl; echo; }
     [ "$l" = "1" ]   && { opt_fd_limits; echo; }

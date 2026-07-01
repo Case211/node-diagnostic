@@ -37,8 +37,9 @@ node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Re
 
 Команды:
   diagnose [-q|-v|--no-net]      Диагностика ноды (23 чека, дашборд, вердикт)
-  optimize [--all|--sysctl|--limits|--rps|--nic|--mss|--dry-run]
+  optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--dry-run]
                                  Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS clamp
+                                 --from-findings — только фиксы по находкам последней диагностики
   protect  [--panel-ip IP] [--node-port N] [--out DIR]
                                  Защита под Remnawave (firewall/fail2ban/SSH) — ГЕНЕРАЦИЯ, не применяет
   bbr3     [--status|--install|--dry-run|--yes]
@@ -82,9 +83,10 @@ menu() {
 menu_optimize() {
     if [ ! -t 0 ]; then run optimize --all; return; fi
     echo -e "  ${BOLD}Оптимизация${NC}"
-    echo -e "    ${DIM}[a] всё   [d] предпросмотр (dry-run)   [Enter] всё${NC}"
+    echo -e "    ${DIM}[a] всё   [f] по находкам диагностики   [d] предпросмотр (dry-run)   [Enter] всё${NC}"
     printf "  выбор: "; local c; read -r c
     case "${c,,}" in
+        f) run optimize --from-findings ;;
         d) run optimize --dry-run ;;
         *) run optimize --all ;;
     esac

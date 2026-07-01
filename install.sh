@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# install.sh — бутстрап node-diagnostic: скачать репозиторий целиком и запустить меню.
+# Установка одной командой:
+#   curl -sSL https://raw.githubusercontent.com/Case211/node-diagnostic/main/install.sh | sudo bash
+# Переопределяемо через env: ND_REPO, ND_REF (ветка/тег), ND_DEST (каталог).
+set -eu
+
+REPO="${ND_REPO:-https://github.com/Case211/node-diagnostic}"
+REF="${ND_REF:-main}"
+if [ "$(id -u)" -eq 0 ]; then DEST="${ND_DEST:-/opt/node-diagnostic}"
+else DEST="${ND_DEST:-$HOME/.local/share/node-diagnostic}"; fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf '  %s\n' "$*"; }
+
+say "node-diagnostic → $DEST  (ref: $REF)"
+
+if have git; then
+    if [ -d "$DEST/.git" ]; then
+        git -C "$DEST" fetch --depth 1 origin "$REF" >/dev/null 2>&1
+        git -C "$DEST" reset --hard "origin/$REF" >/dev/null 2>&1
+        say "обновлено через git"
+    else
+        rm -rf "$DEST"
+        git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DEST"
+        say "склонировано через git"
+    fi
+else
+    # без git — качаем tarball ветки
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    url="$REPO/archive/refs/heads/$REF.tar.gz"
+    if   have curl; then curl -fsSL "$url" -o "$tmp/src.tgz"
+    elif have wget; then wget -qO "$tmp/src.tgz" "$url"
+    else say "нужен git, curl или wget"; exit 1; fi
+    tar -xzf "$tmp/src.tgz" -C "$tmp"
+    mkdir -p "$DEST"
+    cp -r "$tmp"/node-diagnostic-*/. "$DEST/"
+    say "распаковано из tarball"
+fi
+
+chmod +x "$DEST/node-diagnostic.sh" "$DEST"/modules/*.sh "$DEST"/lib/*.sh 2>/dev/null || true
+
+echo
+say "Готово. Запуск:"
+say "  sudo bash $DEST/node-diagnostic.sh"
+
+# запущено интерактивно (не через pipe) — сразу открыть меню
+if [ -t 0 ] && [ -t 1 ]; then
+    exec bash "$DEST/node-diagnostic.sh" "$@"
+fi

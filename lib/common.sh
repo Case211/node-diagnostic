@@ -8,11 +8,11 @@ ND_COMMON_LOADED=1
 
 ND_VERSION="4.0"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
-ND_UNIT_PREFIX="node-diagnostic"
 
 # ────────────────────────────────────────────────────────────────────
-# Палитра
+# Палитра (цвета/CLR_LINE используются модулями, которые source этот файл)
 # ────────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2034
 if [ -t 1 ]; then
     R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'
     B=$'\033[0;34m'; C=$'\033[0;36m'; M=$'\033[0;35m'
@@ -54,6 +54,8 @@ run_or_dry() {
         echo -e "    ${DIM}[dry-run]${NC} $*"
         return 0
     fi
+    # команды приходят одной строкой (собраны с ${arr[*]}), eval здесь намеренный
+    # shellcheck disable=SC2294
     eval "$@"
 }
 
@@ -75,7 +77,7 @@ backup_settings() {
     have ip6tables-save && ip6tables-save > "$BACKUP_DIR/ip6tables-$ts.rules" 2>/dev/null
     have nft            && nft list ruleset > "$BACKUP_DIR/nft-$ts.rules"      2>/dev/null
     msg_info "backup: $BACKUP_DIR/*-$ts.* — для ручного отката"
-    BACKUP_DONE=1; BACKUP_TS=$ts
+    BACKUP_DONE=1; export BACKUP_TS="$ts"
     record_fix "backup snapshot $ts"
 }
 
@@ -97,6 +99,29 @@ write_dropin() {
         msg_warn "$target записан, но sysctl --system вернул ошибку (часть ключей может быть недоступна на этом ядре)"
     fi
     record_fix "sysctl dropin $target"
+}
+
+# модуль загружен (или встроен в ядро)?
+module_loaded() { [ -d "/sys/module/$1" ] || lsmod 2>/dev/null | grep -qw "^$1"; }
+
+# модуль вообще существует для этого ядра (built-in или .ko)?
+module_available() { module_loaded "$1" || modinfo "$1" >/dev/null 2>&1; }
+
+# load_module <name> — modprobe + персист в modules-load.d (идемпотентно, namespaced)
+load_module() {
+    local m="$1"
+    if [ "$DRY_RUN" = "1" ]; then echo -e "    ${DIM}[dry-run]${NC} modprobe $m"; return 0; fi
+    modprobe "$m" 2>/dev/null || true
+    local f="/etc/modules-load.d/${ND_DROPIN_PREFIX}.conf"
+    grep -qxF "$m" "$f" 2>/dev/null || echo "$m" >> "$f" 2>/dev/null || true
+}
+
+# verify_sysctl <key> <expected> — сверить фактическое значение с ожидаемым (после применения)
+verify_sysctl() {
+    local key="$1" want="$2" got
+    got=$(sysctl -n "$key" 2>/dev/null)
+    # нормализуем пробелы (для tcp_rmem "a b c")
+    [ "$(echo "$got")" = "$(echo "$want")" ]
 }
 
 # ────────────────────────────────────────────────────────────────────
@@ -122,7 +147,7 @@ can_install_kernel() {
 # уровень x86-64 psABI: печатает 1..4 по флагам /proc/cpuinfo (для выбора сборки XanMod)
 cpu_psabi_level() {
     local f; f=$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null)
-    local has; has() { echo "$f" | grep -qw "$1"; }
+    has() { echo "$f" | grep -qw "$1"; }
     local lvl=1
     if has cx16 && has lahf_lm && has popcnt && has sse4_1 && has sse4_2 && has ssse3; then
         lvl=2

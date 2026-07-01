@@ -18,6 +18,10 @@ XANMOD_KEYRING="/etc/apt/keyrings/xanmod-archive-keyring.gpg"
 XANMOD_LIST="/etc/apt/sources.list.d/xanmod-release.list"
 # Отпечаток сверять на 2026 (xanmod.org). Полный fingerprint, не 64-бит keyid.
 XANMOD_FPR="D38D7D1DA1349567ADED882D86F7D09EE734E623"
+BBR3_LEVEL="${BBR3_LEVEL:-}"     # ручной override psABI-уровня (1..4), иначе автодетект
+
+# CPU-модель выглядит маскированной? (qemu64/kvm64 → флаги psABI могут врать → риск не загрузиться)
+cpu_masked() { awk -F: '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null | grep -qiE 'qemu|kvm64|common kvm|virtual cpu'; }
 
 # BBRv3 активен, если ядро XanMod и версия >= 6.4 (XanMod по умолчанию с BBRv3 с 6.4.0).
 is_bbr3() {
@@ -101,7 +105,7 @@ bbr3_add_repo() {
 
 # подбирает доступный пакет по psABI-уровню, деградируя v3→v2→v1
 bbr3_pick_pkg() {
-    local lvl; lvl=$(cpu_psabi_level)
+    local lvl="${BBR3_LEVEL:-$(cpu_psabi_level)}"
     local l
     for l in "$lvl" 2 1; do
         for pkg in "linux-xanmod-lts-x64v${l}" "linux-xanmod-x64v${l}"; do
@@ -115,8 +119,12 @@ bbr3_pick_pkg() {
 
 bbr3_install() {
     bbr3_preflight
+    local eff_lvl="${BBR3_LEVEL:-$(cpu_psabi_level)}"
     echo -e "  ${BOLD}Установка XanMod-ядра (BBRv3)${NC}"
-    echo -e "    ${DIM}virt=$(detect_virt) · psABI=v$(cpu_psabi_level) · $(os_id)/$(os_codename)${NC}"
+    echo -e "    ${DIM}virt=$(detect_virt) · psABI=v${eff_lvl}$([ -n "$BBR3_LEVEL" ] && echo ' (override)') · $(os_id)/$(os_codename)${NC}"
+    if [ -z "$BBR3_LEVEL" ] && cpu_masked; then
+        msg_warn "CPU-модель маскирована (qemu64/kvm64) — флаги psABI могут врать. Если ядро не загрузится, переставь консервативнее: --level 2"
+    fi
     echo
 
     bbr3_add_repo || die "не удалось добавить репозиторий."
@@ -200,6 +208,7 @@ bbr3_main() {
         case "$1" in
             --status)  action="status" ;;
             --install) action="install" ;;
+            --level)   BBR3_LEVEL="$2"; shift ;;
             --yes|-y)  ASSUME_YES=1 ;;
             --dry-run) DRY_RUN=1 ;;
             *) die "bbr3: неизвестный аргумент $1" ;;

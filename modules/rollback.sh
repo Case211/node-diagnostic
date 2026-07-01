@@ -12,7 +12,7 @@ if [ -z "${ND_COMMON_LOADED:-}" ]; then
 fi
 
 rollback_all() {
-    need_root || die "нужен root."
+    [ "$DRY_RUN" = "1" ] || need_root || die "нужен root."
     local removed=0
 
     echo -e "  ${BOLD}Откат артефактов node-diagnostic${NC}"
@@ -27,6 +27,8 @@ rollback_all() {
     # sysctl drop-in
     local f
     for f in /etc/sysctl.d/${ND_DROPIN_PREFIX}-*.conf; do [ -e "$f" ] && _rm "$f"; done
+    # modules-load.d (tcp_bbr/nf_conntrack/sch_cake)
+    _rm "/etc/modules-load.d/${ND_DROPIN_PREFIX}.conf"
     # FD-лимиты
     _rm /etc/security/limits.d/99-node-diagnostic.conf
     _rm /etc/systemd/system.conf.d/99-node-diagnostic-limits.conf
@@ -49,6 +51,7 @@ rollback_all() {
 
     # iptables MSS clamp (наше правило)
     if have iptables; then
+        # shellcheck disable=SC2054  # SYN,RST — маска флагов iptables, не разделитель массива
         local rule_args=(-p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu)
         local chain
         for chain in FORWARD OUTPUT; do

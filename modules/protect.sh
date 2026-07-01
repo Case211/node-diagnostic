@@ -225,7 +225,7 @@ _gen_apply() {
   # держи ВТОРУЮ SSH-сессию открытой на время применения.
 
 --- 2. fail2ban ---
-  sudo apt install -y fail2ban
+  sudo apt install -y fail2ban        # Debian/Ubuntu · dnf install fail2ban (RHEL/Fedora) · apk add fail2ban (Alpine)
   sudo cp $out/fail2ban-sshd.local /etc/fail2ban/jail.d/sshd.local
   sudo systemctl enable --now fail2ban && sudo fail2ban-client status sshd
 
@@ -253,7 +253,6 @@ protect_main() {
             --panel-ip)  PANEL_IP="$2"; shift ;;
             --node-port) NODE_PORT="$2"; shift ;;
             --out)       PROTECT_OUT="$2"; shift ;;
-            --dry-run)   DRY_RUN=1 ;;
             *) die "protect: неизвестный аргумент $1" ;;
         esac
         shift

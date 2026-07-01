@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck (severity=warning)
+        run: shellcheck --severity=warning --shell=bash node-diagnostic.sh install.sh lib/common.sh modules/*.sh tests/smoke.sh
+
+  smoke-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y iproute2 procps nftables python3 gawk
+      - name: smoke
+        run: bash tests/smoke.sh
+
+  smoke-debian:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke in debian:12
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w debian:12 bash -c '
+            apt-get update -qq
+            apt-get install -y -qq bash iproute2 procps nftables python3 gawk grep sed coreutils >/dev/null
+            bash tests/smoke.sh'
