@@ -153,6 +153,7 @@ EOF
 }
 
 # ── 3. RPS + RFS + XPS (размазать softirq/поток по CPU) ──────────────
+# shellcheck disable=SC2120  # iface — опциональный аргумент (обычно берётся из default_iface)
 opt_rps() {
     local iface="${1:-$(default_iface)}"
     [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
@@ -197,6 +198,7 @@ UNIT
 }
 
 # ── 4. NIC: ring buffers + offloads + txqueuelen ─────────────────────
+# shellcheck disable=SC2120  # iface — опциональный аргумент (обычно берётся из default_iface)
 opt_nic() {
     local iface="${1:-$(default_iface)}"
     [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
