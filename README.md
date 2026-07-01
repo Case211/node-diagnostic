@@ -1,126 +1,142 @@
 # node-diagnostic
 
-Диагностика VPN/Linux-ноды для YouTube, видео-CDN и популярных сервисов одной командой. Прогресс-бар, сводка, вердикт и автоприменение исправлений — всё в одном bash-скрипте, без зависимостей кроме базовых утилит.
+Модульный тулкит для VPN/Linux-ноды (заточен под стек **Remnawave**): диагностика, оптимизация сети, защита и установка ядра с BBRv3. Диагностика — компактный дашборд с прогресс-баром, сводкой и вердиктом; фиксы вынесены в отдельные модули с явным откатом.
 
 ```
-╔═════════════════════════════════════════════════════════════════════╗
-║   Node Diagnostic v3.3 · 2026-05-06 18:42 UTC                       ║
-╚═════════════════════════════════════════════════════════════════════╝
+  NODE DIAGNOSTIC  v4.0 · toolkit
+  ─────────────────────────────────────────────────────
 
 [ 1/23] ✓ Идентификация             host.example.com · Helsinki/FI · ~2ms→Tallinn
 [ 2/23] ✓ CPU и нагрузка            2c · load 0.05 · idle 94%
-[ 3/23] ✓ Память                    55% доступно
-[ 4/23] ✓ NIC / интерфейс           ens3 · mtu 1500 · drops 0/0
 [ 5/23] ⚠ Туннели                   1 активн.: NetBird:wt0 (MTU=1280)
 [ 6/23] ✓ TCP congestion            bbr + cake
 [ 7/23] ⚠ TCP tuning                mtu_probing=0
-[ 8/23] ✓ Conntrack                 4006 / 524288 (0%)
-[ 9/23] ⚠ DNS-резолв                3/5 fail (Netbird DNS таймаутит)
 [10/23] ✗ PMTU                      1437 (вместо 1500)
 [11/23] ✗ Loss до Google            max 18% loss
-[12/23] ✗ Маршрут (mtr)             10h · loss 53% на 62.115.137.119/53.0%
-[13/23] ⚠ QUIC / HTTP-3             udp=on http3=off
 [14/23] ✗ Speed: 1-flow             21 Mbit/s
 ...
 ```
 
-## Что проверяет (23 чека)
+## Модули
+
+| Команда | Что делает | Применяет? |
+|---|---|---|
+| `diagnose` | 23 чека: система, сеть, скорость, сервисы, репутация IP, Xray/Remnanode | — (только читает) |
+| `optimize` | sysctl-тюнинг, BBR+cake, FD-лимиты, RPS/RFS/XPS, NIC offloads, MSS clamp | да (namespaced drop-in) |
+| `protect`  | firewall под Remnawave, fail2ban, SSH-хардненинг, DDoS-хардненинг | **нет — только генерирует файлы** |
+| `bbr3`     | ядро XanMod для TCP **BBRv3** (mainline даёт только v1) | да, но **без автоперезагрузки** |
+| `rollback` | снять всё, что наложил `optimize` | да |
+
+## Структура
+
+```
+node-diagnostic.sh          точка входа: меню + диспетчер команд
+lib/common.sh               палитра, детекторы (virt/psABI/ssh), backup, namespaced drop-in, dry-run
+modules/
+  diagnose.sh               23 чека, дашборд, вердикт, рекомендации
+  optimize.sh               сетевой/системный тюнинг
+  protect.sh                защита ноды (генерация артефактов)
+  bbr3.sh                   установка XanMod (BBRv3)
+  rollback.sh               откат оптимизаций
+```
+
+## Установка
+
+Тулкит модульный — нужен весь репозиторий:
+
+```bash
+git clone https://github.com/Case211/node-diagnostic
+cd node-diagnostic
+sudo bash node-diagnostic.sh        # интерактивное меню
+```
+
+Зависимости диагностики (`mtr`, `dig`, `ethtool`, `conntrack`, `jq` и т.д.) ставятся сами через apt/dnf/yum/apk.
+
+## Использование
+
+```bash
+sudo bash node-diagnostic.sh                       # меню (диагностика, если ввод не TTY)
+sudo bash node-diagnostic.sh diagnose -q           # быстрая диагностика ~1 мин
+sudo bash node-diagnostic.sh optimize --all        # весь тюнинг
+sudo bash node-diagnostic.sh optimize --dry-run    # показать, что применил бы
+sudo bash node-diagnostic.sh protect --panel-ip 1.2.3.4 --node-port 2222
+sudo bash node-diagnostic.sh bbr3 --install        # XanMod (нужен reboot)
+sudo bash node-diagnostic.sh rollback              # откат оптимизаций
+```
+
+Каждый модуль запускается и самостоятельно: `sudo bash modules/optimize.sh --sysctl`.
+
+## Что проверяет `diagnose` (23 чека)
 
 **Система** — CPU/память/load/softirq, NIC drops, ring buffers, ethtool offloads.
+**Сеть** — TCP congestion + qdisc, буферы, conntrack, DNS, PMTU (бинпоиск с защитой от false-negative на лоссе), туннели (WireGuard/NetBird/Tailscale/OpenVPN/IPsec), loss/latency до Google и DNS, MTR с худшим хопом, UDP/QUIC/HTTP-3, IPv6.
+**Производительность** — 1-flow (Cachefly), 4-flow, мульти-CDN (детект ASN-троттлинга), **bufferbloat** (ping под нагрузкой), variance.
+**Сервисы** — reachability + TTFB для 19 популярных (YouTube/Netflix/Twitch/TikTok/Telegram/Discord/ChatGPT/Claude/Gemini/Spotify/…); различает 200 / блок (403/429) / unreachable.
+**Репутация IP** — Cloudflare colo, гео-кросс-чек по 3 базам, реальная локация по latency до IX, Google CAPTCHA-проба, reverse DNS, «датацентр vs резидентский».
+**Xray/Remnanode** — версия, ресурсы контейнера, ошибки в логах, рестарты.
 
-**Сеть** — TCP congestion control + qdisc, буферы, conntrack, DNS-резолв, PMTU (бинарным поиском с защитой от false-negative на сетях с потерями), туннели (WireGuard/NetBird/Tailscale/OpenVPN/IPsec), packet loss и latency до Google и публичных DNS, MTR с детектом худшего хопа, UDP/QUIC/HTTP-3, IPv6.
+## `optimize` — что накладывает
 
-**Производительность** — скорость в один поток (Cachefly), 4 параллельных потока, мульти-CDN тест (Cloudflare/Cachefly/Hetzner/OVH/Linode) для детекта ASN-троттлинга, **bufferbloat** (ping под нагрузкой — главная причина «дёрганых» шортсов), sustained variance.
+Всё пишется в namespaced drop-in (`/etc/sysctl.d/99-node-diagnostic-*.conf`, `node-diagnostic-*.service`), поэтому откат детерминированный (`rollback`), а не восстановление дампа.
 
-**Сервисы** — reachability + TTFB для 19 популярных: YouTube, Netflix, Twitch, TikTok, Telegram, Discord, WhatsApp, Signal, ChatGPT, Claude, Gemini, Spotify, Steam, GitHub и др. Различает 200/блок (403/429)/unreachable.
+- **sysctl** — BBR + cake; **`tcp_min_snd_mss=512`** (пол MSS под `tcp_mtu_probing=1` — без него на лоссовом плече MSS схлопывается до 48б); буферы и conntrack **масштабируются по RAM** (16M→128M); SYN-flood + anti-spoof; TIME_WAIT/keepalive; UDP-буферы (Hysteria2/TUIC/QUIC); `ip_local_port_range`.
+- **FD-лимиты** — `fs.file-max`/`nr_open` + `limits.d` + **systemd `DefaultLimitNOFILE`** (xray-сервис читает именно его) + pam.
+- **RPS/RFS/XPS** — размазать softirq и flow-steering по всем CPU (systemd-юнит для постоянства).
+- **NIC** — ring buffers max + `gro/gso/tso` + `txqueuelen 10000`.
+- **MSS clamp** — iptables TCPMSS `--clamp-mss-to-pmtu` (FORWARD/OUTPUT), persist.
 
-**Репутация IP** — Cloudflare colo, гео-кросс-чек по 3 базам (ipinfo.io, ip-api.com, ipwho.is), реальная локация по latency до национальных IX, Google CAPTCHA-проба, reverse DNS, эвристика «датацентр vs резидентский».
+## `protect` — защита под Remnawave (только генерация)
 
-**Xray/Remnanode** — версия, ресурсы контейнера, ошибки в логах, число рестартов.
+Firewall на удалённой ноде может отрезать SSH, поэтому модуль **ничего не применяет** — пишет готовые артефакты в каталог и даёт пошаговый `APPLY.txt` с защитой от лок-аута (авто-откат правил через `systemd-run` таймер).
 
-## Установка и запуск
-
-# Просто запустить
-```bash
-curl -sSL https://raw.githubusercontent.com/Case211/node-diagnostic/main/node-diagnostic.sh | sudo bash
-```
-# Или скачать и запустить
-```bash
-wget https://raw.githubusercontent.com/Case211/node-diagnostic/main/node-diagnostic.sh
-sudo bash node-diagnostic.sh
-```
-
-Зависимости (`mpstat`, `mtr`, `dig`, `ethtool`, `conntrack`, `jq` и т.д.) скрипт ставит сам через apt/dnf/yum/apk.
-
-## Опции
-
-```
-sudo bash node-diagnostic.sh           # полный прогон ~5 мин
-sudo bash node-diagnostic.sh -q        # быстрый прогон ~1 мин (без mtr/4-flow/multi-CDN/services/variance/bufferbloat)
-sudo bash node-diagnostic.sh -a        # применить ВСЕ рекомендованные фиксы без вопросов
-sudo bash node-diagnostic.sh -n        # вообще не предлагать фиксы
-sudo bash node-diagnostic.sh --dry-run # показать что было бы применено, но не делать
-sudo bash node-diagnostic.sh --no-net  # только локальная конфигурация (без сетевых тестов)
-sudo bash node-diagnostic.sh -v        # детальный режим (всё на экран, как раньше)
-sudo bash node-diagnostic.sh --version
-sudo bash node-diagnostic.sh -h        # справка
-```
-
-## Что умеет автоматически чинить
-
-После прогона показывается список релевантных фиксов (только тех, что реально помогут конкретно этой ноде):
-
-- **sysctl tuning** — BBR + cake qdisc + 64MB буферы + tcp_mtu_probing=1 + tcp_slow_start_after_idle=0 + tcp_notsent_lowat + conntrack 524288. Файл `/etc/sysctl.d/99-vpn-tuning.conf`.
-- **MSS clamping** — iptables TCPMSS clamp в FORWARD/OUTPUT для туннельных интерфейсов с PMTU<1500. Persist через `netfilter-persistent` или `/etc/iptables/rules.v4`.
-- **RPS на NIC** — балансировка softirq по всем CPU. Создаёт systemd unit `node-diagnostic-rps.service`.
-- **Ring buffers up** — `ethtool -G $iface rx max tx max`. Systemd unit для постоянства.
-
-Перед применением — автобэкап (`sysctl -a` и `iptables-save`) в `/var/backups/node-diagnostic/`. История применённых фиксов — в `/etc/node-diagnostic.applied`. В финале выводится команда отката.
-
-## Артефакты прогона
-
-- `/tmp/node-diagnostic-<ts>.log` — полный детальный лог
-- `/tmp/node-diagnostic-summary-<ts>.txt` — компактная плоская сводка (без ANSI-цветов, удобно слать)
-- `/var/backups/node-diagnostic/sysctl-<ts>.txt` — снепшот настроек до фикса
-- `/var/backups/node-diagnostic/iptables-<ts>.rules` — снепшот iptables до фикса
-
-## Типичный сценарий
+Генерируется:
+- `firewall.nft` / `firewall-ufw.sh` — карта портов ноды: **443** (VLESS/Reality + QUIC/HY2) и **80** (ACME/Caddy) всем; **NODE_PORT** (control-API панель→нода) — только с IP панели; **SSH** — с твоего IP; ICMP не режется полностью (нужен для PMTU), только per-IP флуд; per-IP connlimit/SYN-rate; всё прочее — drop. `61000`/localhost и Caddy `:9443`/localhost наружу не открываются.
+- `fail2ban-sshd.local` — джейл SSH с нарастающим баном.
+- `sshd-hardening.conf` — key-only, `PermitRootLogin prohibit-password` и т.д. (модуль проверяет наличие `authorized_keys` и предупреждает о риске лок-аута).
+- `sysctl` DDoS-хардненинг идёт через `optimize` (syncookies/anti-spoof).
 
 ```bash
-# 1. Полный диагноз
-sudo bash node-diagnostic.sh
-
-# 2. Применяешь рекомендованные фиксы (или -a сразу всё)
-
-# 3. Быстро перепроверить, что починилось
-sudo bash node-diagnostic.sh -q
+sudo bash node-diagnostic.sh protect --panel-ip <IP_панели> --node-port <NODE_PORT>
+# → /root/node-diagnostic-protect/  (открыть APPLY.txt)
 ```
 
-## Сравнение нод
+## `bbr3` — TCP BBRv3 через XanMod
 
-Запусти на двух нодах, сравни сводки:
+Mainline-ядро отдаёт только BBRv1; BBRv3 приходит с кастомным ядром **XanMod**. Модуль:
+- гейтит контейнеры (OpenVZ/LXC используют ядро хоста — своё не поставить) и не-x86_64;
+- проверяет **отпечаток GPG-ключа** XanMod перед установкой;
+- выбирает сборку по **psABI** (x64v1..v4) под реальный CPU (иначе ядро не загрузится);
+- **не перезагружает сам**, делает проверки перед reboot (новое ядро в /boot, старое остаётся как откат, GRUB_TIMEOUT);
+- детект «это именно v3»: `uname -r` содержит `xanmod` и ядро ≥6.4.
 
 ```bash
-# Helsinki, NODE HOST AS198550 — медленный
-[10/23] ✗ Loss до Google     max 18% loss
-[11/23] ✗ Маршрут            10h · loss 53% на 62.115.137.119/53.0%
-[14/23] ✗ Speed: 1-flow      21 Mbit/s
-
-# Helsinki, OC NETWORKS AS209693 — рабочий
-[10/23] ✓ Loss до Google     max 0% loss
-[11/23] ✓ Маршрут            8h · loss 0%
-[14/23] ✓ Speed: 1-flow      800 Mbit/s
+sudo bash node-diagnostic.sh bbr3 --status              # что сейчас
+sudo bash node-diagnostic.sh bbr3 --install --dry-run   # план без установки
+sudo bash node-diagnostic.sh bbr3 --install             # затем reboot вручную
 ```
 
-В таком случае sysctl-настройки не помогут — проблема в пиринге провайдера. Скрипт это видит и в сводке отдельно предупреждает.
+## Откат
 
-## Системные требования
+```bash
+sudo bash node-diagnostic.sh rollback            # снять sysctl drop-in, systemd-юниты, limits, MSS clamp
+sudo bash node-diagnostic.sh rollback --dry-run  # показать, что снял бы
+```
+Не входит: ядро XanMod (`apt purge 'linux-xanmod*' && update-grub && reboot`) и firewall/fail2ban/sshd (они generate-only — откат в их `APPLY.txt`).
 
-- Linux (Ubuntu/Debian/RHEL/Fedora/Alpine)
-- bash 4+
-- root для применения фиксов (диагностика без root тоже работает, но часть проверок пропускается)
+## Артефакты
 
-Тестировалось на Ubuntu 22.04, Debian 12, Alpine 3.18.
+- `/tmp/node-diagnostic-<ts>.log` — полный лог диагностики
+- `/tmp/node-diagnostic-summary-<ts>.txt` — плоская сводка без ANSI
+- `/var/backups/node-diagnostic/*` — снапшоты sysctl/iptables/nft перед фиксом
+- `/etc/node-diagnostic.applied` — журнал применённого
+
+## Требования
+
+- Linux (Ubuntu/Debian/RHEL/Fedora/Alpine), bash 4+
+- root — для `optimize`/`protect`/`bbr3`/`rollback` (диагностика работает и без root, часть проверок пропускается)
+- `bbr3` — только bare-metal/KVM x86_64 (не контейнер)
+
+Диагностика тестировалась на Ubuntu 22.04, Debian 12, Alpine 3.18.
 
 ## Лицензия
 
