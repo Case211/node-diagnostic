@@ -156,11 +156,23 @@ bbr3_install() {
 
     bbr3_prereboot_check "$pkg"
 
-    # добить sysctl, чтобы после reboot bbr сразу включился
-    write_dropin bbr <<'EOF'
+    # добить sysctl, чтобы после reboot bbr сразу включился.
+    # Если optimize уже наложил tuning-dropin — правим cc прямо в нём: отдельный
+    # bbr-файл сортируется РАНЬШЕ tuning (b < t), и tuning перекрывал бы cc обратно
+    # (классика: tuning записал cubic на ядре без bbr → поставили XanMod → опять cubic).
+    local tuning="/etc/sysctl.d/${ND_DROPIN_PREFIX}-tuning.conf"
+    if [ -f "$tuning" ]; then
+        sed -i 's/^net\.ipv4\.tcp_congestion_control *=.*/net.ipv4.tcp_congestion_control = bbr/' "$tuning"
+        grep -q '^net\.ipv4\.tcp_congestion_control' "$tuning" \
+            || echo "net.ipv4.tcp_congestion_control = bbr" >> "$tuning"
+        msg_ok "cc=bbr прописан в $tuning (qdisc оставлен — cake/fq оба ок для BBR)"
+        record_fix "bbr3: cc=bbr in tuning dropin"
+    else
+        write_dropin bbr <<'EOF'
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
+    fi
 
     echo
     echo -e "  ${Y}${BOLD}⚠ Нужна перезагрузка${NC} — BBRv3 подхватится только после неё."
