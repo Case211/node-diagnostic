@@ -35,8 +35,11 @@ if command -v nft >/dev/null 2>&1; then
         -e 's/<NODE_PORT>/2222/g' "$out/firewall.nft" > "$out/fw.checked.nft"
     if nft -c -f "$out/fw.checked.nft" >/dev/null 2>&1; then
         ok "nft -c (синтаксис ruleset)"
+    elif [ "$(id -u)" -eq 0 ]; then
+        # под root nft -c обязан работать — фейл значит битый ruleset
+        bad "nft -c (синтаксис ruleset)"
     else
-        echo "  ~ nft -c не прошёл (нужен root/сетевой namespace) — не блокирую CI"
+        echo "  ~ nft -c не прошёл (без root netlink недоступен) — не блокирую"
     fi
 fi
 
@@ -52,7 +55,11 @@ echo "== bbr3 --install --dry-run (без установки) =="
 # на контейнере bbr3 должен КОРРЕКТНО отказаться (не x86 kernel-capable) либо показать план
 bash modules/bbr3.sh --install --dry-run >/dev/null 2>&1
 rc=$?
-[ "$rc" = "0" ] || [ "$rc" = "1" ] && ok "bbr3 install dry-run (rc=$rc)" || bad "bbr3 install dry-run упал (rc=$rc)"
+if [ "$rc" = "0" ] || [ "$rc" = "1" ]; then
+    ok "bbr3 install dry-run (rc=$rc)"
+else
+    bad "bbr3 install dry-run упал (rc=$rc)"
+fi
 
 echo "== diagnose --no-net --json → валидный JSON =="
 if command -v python3 >/dev/null 2>&1; then
