@@ -6,7 +6,7 @@
 [ -n "${ND_COMMON_LOADED:-}" ] && return 0
 ND_COMMON_LOADED=1
 
-ND_VERSION="4.0"
+ND_VERSION="4.0.1"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
 
 # ────────────────────────────────────────────────────────────────────

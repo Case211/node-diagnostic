@@ -66,6 +66,7 @@ protect_generate() {
     [ "$ph_panel" = "<PANEL_IP>" ] && msg_warn "IP панели не задан — в правилах плейсхолдер <PANEL_IP>, подставь перед применением (--panel-ip)"
     [ -z "$NODE_PORT" ] && msg_warn "NODE_PORT не найден — плейсхолдер <NODE_PORT>, подставь (--node-port)"
     [ "$ph_ssh" = "<YOUR_SSH_IP>" ] && msg_warn "SSH-IP не определён (не по SSH?) — подставь свой IP вручную"
+    [ "$ph_ssh" != "<YOUR_SSH_IP>" ] && msg_warn "SSH будет открыт ТОЛЬКО с $ph_ssh — если это домашний/динамический IP, после его смены SSH отрежет (детали в APPLY.txt)"
 
     _gen_nft   "$out" "$ssh_port" "$ph_ssh" "$ph_panel" "${NODE_PORT:-<NODE_PORT>}"
     _gen_ufw   "$out" "$ssh_port" "$ph_ssh" "$ph_panel" "${NODE_PORT:-<NODE_PORT>}"
@@ -214,6 +215,15 @@ _gen_apply() {
 ПЕРЕД ВСЕМ: убедись, что в правилах подставлены реальные значения —
   IP панели вместо <PANEL_IP>, NODE_PORT вместо <NODE_PORT>, твой SSH-IP вместо <YOUR_SSH_IP>.
   Файлы: firewall.nft / firewall-ufw.sh.
+
+⚠ SSH привязан к IP «$ssh_ip». Если это ДОМАШНИЙ/ДИНАМИЧЕСКИЙ IP — после его
+  смены провайдером SSH отрежет наглухо (вход только через VNC/serial-консоль хостера).
+  Варианты до применения:
+    · вписать вместо одного IP подсеть провайдера (whois $ssh_ip → route/CIDR),
+      в firewall.nft: «ip saddr 203.0.113.0/24», в ufw: «from 203.0.113.0/24»;
+    · или убрать ограничение по IP и оставить только rate-limit + fail2ban
+      (nft: убери «ip saddr …» из SSH-правил; ufw: «ufw limit $ssh_port/tcp»);
+    · применяешь как есть — убедись, что VNC-консоль хостера реально работает.
 
 --- 1. FIREWALL (самое опасное — можно отрезать SSH) ---
 Способ А (nftables, с per-IP rate-limit — рекомендуется):

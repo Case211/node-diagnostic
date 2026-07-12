@@ -2,11 +2,13 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
-## [4.0.1] — не выпущено (ветка `fix/audit-2026-07`)
+## [4.0.1] — в `main` с 2026-07-12
 
 Пакет фиксов по аудиту v4.0 после мержа в main.
 
 ### Fixed
+- **protect**: явное предупреждение о лок-ауте при динамическом SSH-IP — на экране при генерации и в `APPLY.txt` (варианты: CIDR подсети провайдера / только rate-limit+fail2ban / проверка VNC-консоли).
+- **версия**: `ND_VERSION`/`SCRIPT_VERSION` дублировались — теперь единый источник `lib/common.sh` (диспетчер передаёт через env, standalone diagnose вытягивает сам).
 - **optimize**: RPS-юнит писал мусор в корень ФС (`/rps_cpus` и др.) и не восстанавливал RPS/RFS/XPS после ребута — systemd раскрывал `$q` в ExecStart (нужно `$$`).
 - **protect**: connlimit на 443 был глобальным на порт (душил ноду при >2048 суммарных соединений), а не per-IP — теперь `meter { ip saddr ct count }`.
 - **protect**: `detect_node_port` мог взять published-порт чужого контейнера и брал internal-часть маппинга вместо хостовой.

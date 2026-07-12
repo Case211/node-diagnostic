@@ -26,6 +26,7 @@ if ! source "$SELF/lib/common.sh" 2>/dev/null; then
     exit 1
 fi
 export FINDINGS_FILE ND_STATE_DIR   # общий findings-файл между диагностикой и модулями
+export ND_VERSION                   # единый источник версии (diagnose.sh печатает её)
 
 run() { local m="$1"; shift; bash "$MOD/$m.sh" "$@"; }
 

@@ -11,9 +11,17 @@
 #   sudo bash modules/diagnose.sh -h        # справка по опциям
 # Фиксы вынесены в отдельные модули (optimize/protect/bbr3) — этот скрипт только диагностирует.
 
-SCRIPT_VERSION="4.0"
 set -u
 LANG=C.UTF-8
+
+# Версия — единый источник lib/common.sh (диспетчер передаёт через env; standalone —
+# вытягиваем сами; pipe-запуск без репозитория — unknown). Дубля числа тут больше нет.
+SCRIPT_VERSION="${ND_VERSION:-}"
+if [ -z "$SCRIPT_VERSION" ]; then
+    SCRIPT_VERSION=$(sed -n 's/^ND_VERSION="\(.*\)"/\1/p' \
+        "$(dirname "${BASH_SOURCE[0]:-$0}")/../lib/common.sh" 2>/dev/null)
+    SCRIPT_VERSION="${SCRIPT_VERSION:-unknown}"
+fi
 
 # ────────────────────────────────────────────────────────────────────
 # Палитра / форматирование
