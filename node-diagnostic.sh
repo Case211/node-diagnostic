@@ -11,13 +11,18 @@
 #   sudo bash node-diagnostic.sh rollback        # откат оптимизаций
 
 set -u
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]:-$0}: при `curl … | bash` BASH_SOURCE пуст — без фоллбэка set -u
+# роняет скрипт с «unbound variable» вместо внятного сообщения ниже
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 MOD="$SELF/modules"
 
 # shellcheck source=lib/common.sh
 if ! source "$SELF/lib/common.sh" 2>/dev/null; then
-    echo "Ошибка: не найден lib/common.sh рядом со скриптом. Клонируй репозиторий целиком:" >&2
-    echo "  git clone https://github.com/Case211/node-diagnostic && cd node-diagnostic" >&2
+    echo "Ошибка: не найден lib/common.sh рядом со скриптом (запуск через pipe?)." >&2
+    echo "Тулкит модульный — нужен весь репозиторий. Установка одной командой:" >&2
+    echo "  curl -sSL https://raw.githubusercontent.com/Case211/node-diagnostic/main/install.sh | sudo bash" >&2
+    echo "или вручную:" >&2
+    echo "  git clone https://github.com/Case211/node-diagnostic && cd node-diagnostic && sudo bash node-diagnostic.sh" >&2
     exit 1
 fi
 export FINDINGS_FILE ND_STATE_DIR   # общий findings-файл между диагностикой и модулями

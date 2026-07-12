@@ -6,9 +6,10 @@
 # Standalone:  sudo bash modules/rollback.sh [--yes|--dry-run]
 
 if [ -z "${ND_COMMON_LOADED:-}" ]; then
-    _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
     # shellcheck source=../lib/common.sh
-    source "$_self/../lib/common.sh"
+    source "$_self/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
 rollback_all() {
@@ -101,6 +102,6 @@ rollback_main() {
     rollback_all
 }
 
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
     rollback_main "$@"
 fi

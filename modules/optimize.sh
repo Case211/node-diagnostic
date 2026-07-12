@@ -6,9 +6,10 @@
 # Как модуль:  source lib/common.sh; source modules/optimize.sh; opt_all
 
 if [ -z "${ND_COMMON_LOADED:-}" ]; then
-    _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
     # shellcheck source=../lib/common.sh
-    source "$_self/../lib/common.sh"
+    source "$_self/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
 # ── масштаб буферов/conntrack по объёму RAM ──────────────────────────
@@ -338,6 +339,6 @@ opt_main() {
     [ "$sw" = "1" ]  && { opt_swappiness; echo; }
 }
 
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
     opt_main "$@"
 fi

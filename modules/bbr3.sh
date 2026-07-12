@@ -8,9 +8,10 @@
 # Как модуль:  source lib/common.sh; source modules/bbr3.sh; bbr3_menu
 
 if [ -z "${ND_COMMON_LOADED:-}" ]; then
-    _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
     # shellcheck source=../lib/common.sh
-    source "$_self/../lib/common.sh"
+    source "$_self/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
 XANMOD_KEY_URL="https://dl.xanmod.org/archive.key"
@@ -235,6 +236,6 @@ bbr3_main() {
 }
 
 # запуск напрямую (не через source)
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
     bbr3_main "$@"
 fi
