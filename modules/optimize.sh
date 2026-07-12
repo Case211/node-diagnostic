@@ -165,16 +165,17 @@ opt_rps() {
         return 0
     fi
     backup_settings
-    echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+    # {}: ошибка самого редиректа (ключа нет в ядре) иначе не глушится 2>/dev/null
+    { echo 32768 > /proc/sys/net/core/rps_sock_flow_entries; } 2>/dev/null || true
     local q
     for q in /sys/class/net/"$iface"/queues/rx-*; do
         [ -d "$q" ] || continue
-        echo "$mask" > "$q/rps_cpus"      2>/dev/null || true
-        echo 4096   > "$q/rps_flow_cnt"   2>/dev/null || true
+        { echo "$mask" > "$q/rps_cpus"; }    2>/dev/null || true
+        { echo 4096   > "$q/rps_flow_cnt"; } 2>/dev/null || true
     done
     for q in /sys/class/net/"$iface"/queues/tx-*; do
         [ -d "$q" ] || continue
-        echo "$mask" > "$q/xps_cpus"      2>/dev/null || true
+        { echo "$mask" > "$q/xps_cpus"; }    2>/dev/null || true
     done
     msg_ok "применено к очередям $iface"
 

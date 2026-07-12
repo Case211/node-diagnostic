@@ -78,7 +78,7 @@ if [ "$(id -u)" -eq 0 ]; then : "${ND_STATE_DIR:=/run/node-diagnostic}"
 else : "${ND_STATE_DIR:=${TMPDIR:-/tmp}/node-diagnostic-$(id -u)}"; fi
 mkdir -p "$ND_STATE_DIR" 2>/dev/null || ND_STATE_DIR=$(mktemp -d)
 FINDINGS_FILE="${FINDINGS_FILE:-$ND_STATE_DIR/findings}"
-: > "$FINDINGS_FILE" 2>/dev/null || FINDINGS_FILE=$(mktemp)   # свежий на каждый прогон
+{ : > "$FINDINGS_FILE"; } 2>/dev/null || FINDINGS_FILE=$(mktemp)   # свежий на каждый прогон
 
 # --json: весь человекочитаемый вывод — в лог, на stdout в конце только JSON (для агрегации по флоту)
 if [ "$JSON" = "1" ]; then exec 3>&1 1>>"$LOG" 2>&1; fi
