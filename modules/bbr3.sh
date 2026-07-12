@@ -132,14 +132,14 @@ bbr3_install() {
 
     local pkg
     if [ "$DRY_RUN" = "1" ]; then
-        pkg="linux-xanmod-lts-x64v$(cpu_psabi_level)"
+        pkg="linux-xanmod-lts-x64v${eff_lvl}"
         echo -e "    ${DIM}[dry-run]${NC} выбрал бы пакет: $pkg"
         echo -e "    ${DIM}[dry-run]${NC} apt-get install -y $pkg && update-grub"
         echo -e "    ${DIM}[dry-run]${NC} reboot НЕ выполняется автоматически"
         return 0
     fi
 
-    pkg=$(bbr3_pick_pkg) || die "не нашёл пакет XanMod под psABI v$(cpu_psabi_level). Проверь 'apt-cache search linux-xanmod'."
+    pkg=$(bbr3_pick_pkg) || die "не нашёл пакет XanMod под psABI v${eff_lvl}. Проверь 'apt-cache search linux-xanmod'."
     msg_info "пакет: $pkg"
 
     if [ "${ASSUME_YES:-0}" != "1" ]; then
