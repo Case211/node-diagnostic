@@ -11,19 +11,29 @@
 #   sudo bash modules/diagnose.sh -h        # справка по опциям
 # Фиксы вынесены в отдельные модули (optimize/protect/bbr3) — этот скрипт только диагностирует.
 
-SCRIPT_VERSION="4.0"
 set -u
 LANG=C.UTF-8
+
+# Версия — единый источник lib/common.sh (диспетчер передаёт через env; standalone —
+# вытягиваем сами; pipe-запуск без репозитория — unknown). Дубля числа тут больше нет.
+SCRIPT_VERSION="${ND_VERSION:-}"
+if [ -z "$SCRIPT_VERSION" ]; then
+    SCRIPT_VERSION=$(sed -n 's/^ND_VERSION="\(.*\)"/\1/p' \
+        "$(dirname "${BASH_SOURCE[0]:-$0}")/../lib/common.sh" 2>/dev/null)
+    SCRIPT_VERSION="${SCRIPT_VERSION:-unknown}"
+fi
 
 # ────────────────────────────────────────────────────────────────────
 # Палитра / форматирование
 # ────────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
+    IS_TTY=1
     R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'
     B=$'\033[0;34m'; C=$'\033[0;36m'; M=$'\033[0;35m'
     BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
     CLR_LINE=$'\033[K'
 else
+    IS_TTY=0
     R=""; G=""; Y=""; B=""; C=""; M=""; BOLD=""; DIM=""; NC=""; CLR_LINE=""
 fi
 
@@ -78,7 +88,7 @@ if [ "$(id -u)" -eq 0 ]; then : "${ND_STATE_DIR:=/run/node-diagnostic}"
 else : "${ND_STATE_DIR:=${TMPDIR:-/tmp}/node-diagnostic-$(id -u)}"; fi
 mkdir -p "$ND_STATE_DIR" 2>/dev/null || ND_STATE_DIR=$(mktemp -d)
 FINDINGS_FILE="${FINDINGS_FILE:-$ND_STATE_DIR/findings}"
-: > "$FINDINGS_FILE" 2>/dev/null || FINDINGS_FILE=$(mktemp)   # свежий на каждый прогон
+{ : > "$FINDINGS_FILE"; } 2>/dev/null || FINDINGS_FILE=$(mktemp)   # свежий на каждый прогон
 
 # --json: весь человекочитаемый вывод — в лог, на stdout в конце только JSON (для агрегации по флоту)
 if [ "$JSON" = "1" ]; then exec 3>&1 1>>"$LOG" 2>&1; fi
@@ -121,7 +131,9 @@ CURL_FLAGS=(--connect-timeout 5 --retry 0 -4)
 print_line() {
     local i=$1 total=$2 icon=$3 name=$4 tail=$5
     local pct=$(( i * 100 / total ))
-    printf "\r${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} %b %-26s ${DIM}%s${NC}\n" \
+    local cr=""
+    [ "$IS_TTY" = "1" ] && cr=$'\r'   # в пайпе/логе \r только мусорит
+    printf "${cr}${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} %b %-26s ${DIM}%s${NC}\n" \
         "$i" "$total" "$pct" "$icon" "$name" "$tail"
 }
 
@@ -192,13 +204,16 @@ run_check() {
 
     local start frame=0
     start=$(date +%s)
-    # Polling каждые ~100ms — спиннер выглядит живым, не дёрганым
-    while kill -0 "$pid" 2>/dev/null; do
-        local el=$(( $(date +%s) - start ))
-        print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$frame" "$el"
-        sleep 0.1
-        frame=$(( frame + 1 ))
-    done
+    # Спиннер — только на живом терминале: в пайп/лог он льёт кадры 10 раз в секунду
+    if [ "$IS_TTY" = "1" ]; then
+        # Polling каждые ~100ms — спиннер выглядит живым, не дёрганым
+        while kill -0 "$pid" 2>/dev/null; do
+            local el=$(( $(date +%s) - start ))
+            print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$frame" "$el"
+            sleep 0.1
+            frame=$(( frame + 1 ))
+        done
+    fi
     wait "$pid" 2>/dev/null || true
 
     local dur=$(( $(date +%s) - start ))
@@ -233,11 +248,9 @@ ensure_deps() {
     )
     local PKG_INSTALL="" IDX=0
     if   have apt-get; then PKG_INSTALL="apt-get install -y -qq"; IDX=0
-                            apt-get update -qq >/dev/null 2>&1 || true
     elif have dnf;     then PKG_INSTALL="dnf install -y -q";      IDX=1
     elif have yum;     then PKG_INSTALL="yum install -y -q";      IDX=1
     elif have apk;     then PKG_INSTALL="apk add --quiet";        IDX=2
-                            apk update -q >/dev/null 2>&1 || true
     fi
     [ -z "$PKG_INSTALL" ] && return
     [ "$EUID" -ne 0 ] && return
@@ -250,6 +263,11 @@ ensure_deps() {
         fi
     done
     [ ${#NEED[@]} -eq 0 ] && return
+    # индекс пакетов обновляем только когда реально есть что ставить —
+    # иначе каждый прогон диагностики начинался с многосекундного apt-get update
+    if   have apt-get; then apt-get update -qq >/dev/null 2>&1 || true
+    elif have apk;     then apk update -q      >/dev/null 2>&1 || true
+    fi
     # shellcheck disable=SC2086
     $PKG_INSTALL ${!NEED[*]} >/dev/null 2>&1 || true
 }
@@ -262,6 +280,22 @@ ensure_deps() {
 check_identify() {
     local h ip4 ip6 kern distro virt up
     h=$(hostname)
+
+    # --no-net: без внешних проб (ipify/гео-базы/latency до IX) — только локальные факты
+    if [ "$NO_NET" = "1" ]; then
+        kern=$(uname -sr)
+        distro=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || echo unknown)
+        virt=$(systemd-detect-virt 2>/dev/null || echo unknown)
+        up=$(uptime -p 2>/dev/null || echo "?")
+        echo "Hostname: $h"
+        echo "Kernel: $kern  Distro: $distro  Virt: $virt  Uptime: $up"
+        summary_kv "Хост" "$h"
+        summary_kv "Ядро" "$kern · $distro"
+        RES_STATUS=ok
+        RES_SUMMARY="$h · offline (--no-net)"
+        return
+    fi
+
     ip4=$(curl "${CURL_FLAGS[@]}" -s --max-time 5 https://api.ipify.org || echo "")
     ip6=$(curl --connect-timeout 5 -6 -s --max-time 5 https://api64.ipify.org 2>/dev/null || echo "")
 
@@ -713,7 +747,17 @@ check_pmtu() {
         return
     fi
 
-    local hi=1472 lo=576 best=0 mid
+    # 1472 не прошёл. Прежде чем бинпоиском искать порог — убедимся, что ICMP
+    # вообще ходит: иначе best останется 0 и получится бредовый «PMTU=28».
+    if ! pmtu_probe 548; then
+        RES_STATUS=skip
+        RES_SUMMARY="ICMP не проходит — тест невозможен"
+        summary_kv "PMTU" "не измерить (ICMP blocked)"
+        finding 1 pmtu "PMTU не измерить: даже минимальный DF-пакет (576б) не проходит — ICMP порезан фаерволом/хостером. На всякий случай включи tcp_mtu_probing=1 (PMTUD без ICMP тоже слепой)"
+        return
+    fi
+
+    local hi=1472 lo=548 best=548 mid
     for _ in $(seq 1 12); do
         mid=$(( (hi + lo) / 2 ))
         if pmtu_probe "$mid"; then
@@ -821,11 +865,13 @@ check_mtr() {
 
 # 12. UDP / QUIC / HTTP/3
 check_quic() {
-    local udp_ok=0 h3_ok=0
+    # udp_ok: 1=прошёл, 0=не прошёл, -1=нечем проверить (нет nc — это НЕ блокировка)
+    local udp_ok=-1 h3_ok=0
     if have nc; then
+        udp_ok=0
         timeout 3 nc -u -z 8.8.8.8 443 >/dev/null 2>&1 && udp_ok=1
     fi
-    echo "UDP/443 → 8.8.8.8: $([ $udp_ok -eq 1 ] && echo OK || echo FAIL)"
+    echo "UDP/443 → 8.8.8.8: $([ $udp_ok -eq 1 ] && echo OK || { [ $udp_ok -eq 0 ] && echo FAIL || echo "SKIP (нет nc)"; })"
 
     if curl --help all 2>/dev/null | grep -q -- '--http3'; then
         if curl --http3 -sS -o /dev/null --max-time 6 https://www.youtube.com >/dev/null 2>&1; then
@@ -834,7 +880,10 @@ check_quic() {
         fi
     fi
 
-    summary_kv "QUIC/HTTP3" "udp=$([ $udp_ok = 1 ] && echo on || echo off) http3=$([ $h3_ok = 1 ] && echo on || echo off)"
+    local udp_label="off"
+    [ $udp_ok -eq 1 ]  && udp_label="on"
+    [ $udp_ok -eq -1 ] && udp_label="?"
+    summary_kv "QUIC/HTTP3" "udp=$udp_label http3=$([ $h3_ok = 1 ] && echo on || echo off)"
 
     RES_STATUS=ok
     RES_SUMMARY="udp ok"
@@ -842,6 +891,8 @@ check_quic() {
         RES_STATUS=warn
         RES_SUMMARY="UDP/443 заблокирован?"
         finding 2 quic "UDP/443 не проходит — клиенты валятся на TCP, шортсы дольше стартуют"
+    elif [ $udp_ok -eq -1 ]; then
+        RES_SUMMARY="udp-проба пропущена (нет nc)"
     fi
     if [ $h3_ok -eq 0 ] && curl --help all 2>/dev/null | grep -q -- '--http3'; then
         finding 1 quic "curl --http3 не отвечает — QUIC до Google ослаб"
@@ -851,9 +902,11 @@ check_quic() {
 # 13. Скорость: одиночный поток (Cachefly 100 МБ)
 check_speed_single() {
     local out spd_bps spd_mbit code size
+    # || true, НЕ || out="": при exit 28 (max-time) curl уже напечатал -w с реальной
+    # средней скоростью — затирать её значит объявлять fail любому каналу <~70 Mbit/s
     out=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 12 \
         -w "%{speed_download}|%{size_download}|%{time_total}|%{http_code}" \
-        "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || out=""
+        "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || true
     echo "raw: $out"
     spd_bps=$(echo "$out" | cut -d'|' -f1)
     size=$(echo    "$out" | cut -d'|' -f2)
@@ -1022,8 +1075,9 @@ check_variance() {
     local fails=0
     for i in 1 2 3 4 5; do
         local spd spd_int
+        # || true: exit 28 = «не докачал за 5с», но средняя скорость в -w честная
         spd=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 5 \
-            -w "%{speed_download}" "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || spd="0"
+            -w "%{speed_download}" "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || true
         spd_int=$(printf '%.0f' "${spd:-0}" 2>/dev/null || echo 0)
         if [ -z "$spd" ] || [ "${spd_int:-0}" -lt 10000 ]; then
             fails=$((fails+1))
@@ -1152,20 +1206,21 @@ check_services() {
         "WhatsApp|https://web.whatsapp.com/"
         "Signal|https://signal.org/"
         "ChatGPT|https://chat.openai.com/"
-        "Claude|https://claude.ai/"
+        "Claude|https://claude.ai/|bw"
         "Gemini|https://gemini.google.com/"
         "Spotify|https://open.spotify.com/"
         "Steam|https://store.steampowered.com/"
         "GitHub|https://github.com/"
-        "Reddit|https://www.reddit.com/"
+        "Reddit|https://www.reddit.com/|bw"
     )
+    # bw = bot-wall: фронт отдаёт 403 любому curl (анти-бот), это НЕ блок конкретного IP
 
     local fails=0 blocked=0 slow=0 ok_count=0 total=0
     local failed_list="" blocked_list="" slow_list=""
 
     for entry in "${SERVICES[@]}"; do
-        local name=${entry%%|*}
-        local url=${entry##*|}
+        local name url flag
+        IFS='|' read -r name url flag <<< "$entry"
         total=$((total+1))
         local out code ttfb
         out=$(curl "${CURL_FLAGS[@]}" -sS -L -o /dev/null --max-time 8 \
@@ -1185,7 +1240,16 @@ check_services() {
                     printf "  %-15s %s %3sms\n" "$name" "$code" "$ttfb"
                 fi
                 ;;
-            403|429|451)
+            403|429)
+                if [ "$flag" = "bw" ]; then
+                    printf "  %-15s ${DIM}%s bot-wall (анти-бот, не блок IP)${NC}\n" "$name" "$code"
+                else
+                    blocked=$((blocked+1))
+                    blocked_list="$blocked_list $name($code)"
+                    printf "  %-15s ${R}%s blocked${NC}\n" "$name" "$code"
+                fi
+                ;;
+            451)
                 blocked=$((blocked+1))
                 blocked_list="$blocked_list $name($code)"
                 printf "  %-15s ${R}%s blocked${NC}\n" "$name" "$code"
@@ -1246,7 +1310,7 @@ check_cdn_multi() {
         local spd code
         local out
         out=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 8 \
-            -w "%{speed_download}|%{http_code}" "$url" 2>/dev/null) || out="0|000"
+            -w "%{speed_download}|%{http_code}" "$url" 2>/dev/null) || true
         spd=${out%%|*}
         code=${out##*|}
         # curl возвращает "0.000" при таймауте/ошибке — нормализуем к целому
@@ -1656,7 +1720,7 @@ fi
 
 # ─── рекомендации: какие модули запустить (сами фиксы — в модулях) ───
 if [ -s "$FINDINGS_FILE" ]; then
-    _sd=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    _sd=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
     echo
     echo -e "${DIM}  ──────────────────────────────  РЕКОМЕНДАЦИИ  ──────────────────────────────${NC}"
     echo

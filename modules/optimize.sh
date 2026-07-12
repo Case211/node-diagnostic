@@ -6,9 +6,10 @@
 # Как модуль:  source lib/common.sh; source modules/optimize.sh; opt_all
 
 if [ -z "${ND_COMMON_LOADED:-}" ]; then
-    _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
     # shellcheck source=../lib/common.sh
-    source "$_self/../lib/common.sh"
+    source "$_self/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
 # ── масштаб буферов/conntrack по объёму RAM ──────────────────────────
@@ -165,16 +166,17 @@ opt_rps() {
         return 0
     fi
     backup_settings
-    echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+    # {}: ошибка самого редиректа (ключа нет в ядре) иначе не глушится 2>/dev/null
+    { echo 32768 > /proc/sys/net/core/rps_sock_flow_entries; } 2>/dev/null || true
     local q
     for q in /sys/class/net/"$iface"/queues/rx-*; do
         [ -d "$q" ] || continue
-        echo "$mask" > "$q/rps_cpus"      2>/dev/null || true
-        echo 4096   > "$q/rps_flow_cnt"   2>/dev/null || true
+        { echo "$mask" > "$q/rps_cpus"; }    2>/dev/null || true
+        { echo 4096   > "$q/rps_flow_cnt"; } 2>/dev/null || true
     done
     for q in /sys/class/net/"$iface"/queues/tx-*; do
         [ -d "$q" ] || continue
-        echo "$mask" > "$q/xps_cpus"      2>/dev/null || true
+        { echo "$mask" > "$q/xps_cpus"; }    2>/dev/null || true
     done
     msg_ok "применено к очередям $iface"
 
@@ -189,7 +191,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do echo $mask > \$q/rps_cpus; echo 4096 > \$q/rps_flow_cnt; done; for q in /sys/class/net/$iface/queues/tx-*; do echo $mask > \$q/xps_cpus; done'
+ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do echo $mask > \$\$q/rps_cpus; echo 4096 > \$\$q/rps_flow_cnt; done; for q in /sys/class/net/$iface/queues/tx-*; do echo $mask > \$\$q/xps_cpus; done'
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -337,6 +339,6 @@ opt_main() {
     [ "$sw" = "1" ]  && { opt_swappiness; echo; }
 }
 
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
     opt_main "$@"
 fi

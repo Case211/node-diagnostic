@@ -6,7 +6,7 @@
 [ -n "${ND_COMMON_LOADED:-}" ] && return 0
 ND_COMMON_LOADED=1
 
-ND_VERSION="4.0"
+ND_VERSION="4.0.1"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
 
 # ────────────────────────────────────────────────────────────────────
@@ -92,6 +92,7 @@ write_dropin() {
         return 0
     fi
     backup_settings
+    mkdir -p /etc/sysctl.d 2>/dev/null || true
     { echo "# Managed by node-diagnostic ($ND_VERSION). Откат: rm этот файл + sysctl --system"; cat; } > "$target"
     if sysctl --system >/dev/null 2>&1; then
         msg_ok "$target применён"
@@ -113,15 +114,21 @@ load_module() {
     if [ "$DRY_RUN" = "1" ]; then echo -e "    ${DIM}[dry-run]${NC} modprobe $m"; return 0; fi
     modprobe "$m" 2>/dev/null || true
     local f="/etc/modules-load.d/${ND_DROPIN_PREFIX}.conf"
-    grep -qxF "$m" "$f" 2>/dev/null || echo "$m" >> "$f" 2>/dev/null || true
+    mkdir -p /etc/modules-load.d 2>/dev/null || true
+    # редирект оборачиваем в {}: иначе его ошибка (нет каталога/ro-fs) летит на экран
+    grep -qxF "$m" "$f" 2>/dev/null || { echo "$m" >> "$f"; } 2>/dev/null || true
 }
 
 # verify_sysctl <key> <expected> — сверить фактическое значение с ожидаемым (после применения)
 verify_sysctl() {
     local key="$1" want="$2" got
     got=$(sysctl -n "$key" 2>/dev/null)
-    # нормализуем пробелы (для tcp_rmem "a b c")
-    [ "$(echo "$got")" = "$(echo "$want")" ]
+    # multi-value ключи (tcp_rmem) sysctl отдаёт с ТАБАМИ, drop-in пишем с пробелами —
+    # echo в кавычках их не схлопывает; сравниваем по полям
+    local -a g=() w=()
+    read -ra g <<< "$got"
+    read -ra w <<< "$want"
+    [ "${g[*]}" = "${w[*]}" ]
 }
 
 # ────────────────────────────────────────────────────────────────────
@@ -131,9 +138,12 @@ detect_virt() { systemd-detect-virt 2>/dev/null || echo "unknown"; }
 
 is_container() {
     systemd-detect-virt --container --quiet 2>/dev/null && return 0
+    [ -f /.dockerenv ] && return 0          # Docker (без systemd и container= в environ)
+    [ -f /run/.containerenv ] && return 0   # Podman
     [ -e /proc/vz ] && return 0
     [ -e /proc/user_beancounters ] && return 0
     grep -qa 'container=' /proc/1/environ 2>/dev/null && return 0
+    grep -qaE ':/(docker|lxc|kubepods|containerd)' /proc/1/cgroup 2>/dev/null && return 0
     return 1
 }
 

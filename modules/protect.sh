@@ -8,9 +8,10 @@
 # Как модуль:  source lib/common.sh; source modules/protect.sh; protect_generate
 
 if [ -z "${ND_COMMON_LOADED:-}" ]; then
-    _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
     # shellcheck source=../lib/common.sh
-    source "$_self/../lib/common.sh"
+    source "$_self/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
 # ── детект параметров Remnawave-ноды ────────────────────────────────
@@ -21,9 +22,12 @@ detect_node_port() {
         v=$(awk -F= '/^[[:space:]]*NODE_PORT[[:space:]]*=/{gsub(/[" ]/,"",$2);print $2;exit}' "$f")
         [ -n "$v" ] && { echo "$v"; return 0; }
     done
-    # из запущенного контейнера remnanode
+    # из запущенного контейнера remnanode — ТОЛЬКО он: первый попавшийся published-порт
+    # чужого контейнера (Caddy и т.п.) уехал бы в firewall как NODE_PORT.
+    # Берём хостовую часть маппинга (куда реально стучится панель), не внутреннюю.
     if have docker; then
-        v=$(docker ps --format '{{.Ports}}' 2>/dev/null | grep -oE '0.0.0.0:[0-9]+->[0-9]+' | head -1 | grep -oE '->[0-9]+' | tr -d '->')
+        v=$(docker ps --filter name=remnanode --format '{{.Ports}}' 2>/dev/null \
+            | grep -oE ':[0-9]+->' | head -1 | tr -cd '0-9')
         [ -n "$v" ] && { echo "$v"; return 0; }
     fi
     return 1
@@ -62,6 +66,7 @@ protect_generate() {
     [ "$ph_panel" = "<PANEL_IP>" ] && msg_warn "IP панели не задан — в правилах плейсхолдер <PANEL_IP>, подставь перед применением (--panel-ip)"
     [ -z "$NODE_PORT" ] && msg_warn "NODE_PORT не найден — плейсхолдер <NODE_PORT>, подставь (--node-port)"
     [ "$ph_ssh" = "<YOUR_SSH_IP>" ] && msg_warn "SSH-IP не определён (не по SSH?) — подставь свой IP вручную"
+    [ "$ph_ssh" != "<YOUR_SSH_IP>" ] && msg_warn "SSH будет открыт ТОЛЬКО с $ph_ssh — если это домашний/динамический IP, после его смены SSH отрежет (детали в APPLY.txt)"
 
     _gen_nft   "$out" "$ssh_port" "$ph_ssh" "$ph_panel" "${NODE_PORT:-<NODE_PORT>}"
     _gen_ufw   "$out" "$ssh_port" "$ph_ssh" "$ph_panel" "${NODE_PORT:-<NODE_PORT>}"
@@ -111,7 +116,9 @@ table inet node_protect {
         tcp dport $ssh_port ip saddr $ssh_ip accept
 
         # 443 — публичный вход. Per-IP лимит одновременных соединений и SYN-rate.
-        tcp dport 443 ct count over $CONN_LIMIT drop
+        # (ct count вне meter считал бы ВСЕ соединения порта разом — душил бы ноду целиком)
+        tcp dport 443 ct state new \\
+            meter conn443 { ip saddr ct count over $CONN_LIMIT } drop
         tcp dport 443 ct state new \\
             meter syn443 { ip saddr limit rate over ${SYN_RATE}/second burst $((SYN_RATE*2)) packets } drop
         tcp dport 443 accept
@@ -209,6 +216,15 @@ _gen_apply() {
   IP панели вместо <PANEL_IP>, NODE_PORT вместо <NODE_PORT>, твой SSH-IP вместо <YOUR_SSH_IP>.
   Файлы: firewall.nft / firewall-ufw.sh.
 
+⚠ SSH привязан к IP «$ssh_ip». Если это ДОМАШНИЙ/ДИНАМИЧЕСКИЙ IP — после его
+  смены провайдером SSH отрежет наглухо (вход только через VNC/serial-консоль хостера).
+  Варианты до применения:
+    · вписать вместо одного IP подсеть провайдера (whois $ssh_ip → route/CIDR),
+      в firewall.nft: «ip saddr 203.0.113.0/24», в ufw: «from 203.0.113.0/24»;
+    · или убрать ограничение по IP и оставить только rate-limit + fail2ban
+      (nft: убери «ip saddr …» из SSH-правил; ufw: «ufw limit $ssh_port/tcp»);
+    · применяешь как есть — убедись, что VNC-консоль хостера реально работает.
+
 --- 1. FIREWALL (самое опасное — можно отрезать SSH) ---
 Способ А (nftables, с per-IP rate-limit — рекомендуется):
   # СТРАХОВКА от лок-аута: авто-откат через 300с, если не подтвердишь
@@ -260,6 +276,6 @@ protect_main() {
     protect_generate
 }
 
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
     protect_main "$@"
 fi

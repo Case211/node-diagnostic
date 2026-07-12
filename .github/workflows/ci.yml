@@ -21,7 +21,8 @@ jobs:
       - name: deps
         run: sudo apt-get update && sudo apt-get install -y iproute2 procps nftables python3 gawk
       - name: smoke
-        run: bash tests/smoke.sh
+        # sudo: nft -c требует netlink (CAP_NET_ADMIN) — без root проверка ruleset молча скипалась
+        run: sudo bash tests/smoke.sh
 
   smoke-debian:
     runs-on: ubuntu-latest
@@ -29,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: smoke in debian:12
         run: |
-          docker run --rm -v "$PWD:/w" -w /w debian:12 bash -c '
+          docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w debian:12 bash -c '
             apt-get update -qq
             apt-get install -y -qq bash iproute2 procps nftables python3 gawk grep sed coreutils >/dev/null
             bash tests/smoke.sh'

@@ -8,9 +8,10 @@
 # Как модуль:  source lib/common.sh; source modules/bbr3.sh; bbr3_menu
 
 if [ -z "${ND_COMMON_LOADED:-}" ]; then
-    _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
     # shellcheck source=../lib/common.sh
-    source "$_self/../lib/common.sh"
+    source "$_self/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
 XANMOD_KEY_URL="https://dl.xanmod.org/archive.key"
@@ -131,14 +132,14 @@ bbr3_install() {
 
     local pkg
     if [ "$DRY_RUN" = "1" ]; then
-        pkg="linux-xanmod-lts-x64v$(cpu_psabi_level)"
+        pkg="linux-xanmod-lts-x64v${eff_lvl}"
         echo -e "    ${DIM}[dry-run]${NC} выбрал бы пакет: $pkg"
         echo -e "    ${DIM}[dry-run]${NC} apt-get install -y $pkg && update-grub"
         echo -e "    ${DIM}[dry-run]${NC} reboot НЕ выполняется автоматически"
         return 0
     fi
 
-    pkg=$(bbr3_pick_pkg) || die "не нашёл пакет XanMod под psABI v$(cpu_psabi_level). Проверь 'apt-cache search linux-xanmod'."
+    pkg=$(bbr3_pick_pkg) || die "не нашёл пакет XanMod под psABI v${eff_lvl}. Проверь 'apt-cache search linux-xanmod'."
     msg_info "пакет: $pkg"
 
     if [ "${ASSUME_YES:-0}" != "1" ]; then
@@ -156,11 +157,23 @@ bbr3_install() {
 
     bbr3_prereboot_check "$pkg"
 
-    # добить sysctl, чтобы после reboot bbr сразу включился
-    write_dropin bbr <<'EOF'
+    # добить sysctl, чтобы после reboot bbr сразу включился.
+    # Если optimize уже наложил tuning-dropin — правим cc прямо в нём: отдельный
+    # bbr-файл сортируется РАНЬШЕ tuning (b < t), и tuning перекрывал бы cc обратно
+    # (классика: tuning записал cubic на ядре без bbr → поставили XanMod → опять cubic).
+    local tuning="/etc/sysctl.d/${ND_DROPIN_PREFIX}-tuning.conf"
+    if [ -f "$tuning" ]; then
+        sed -i 's/^net\.ipv4\.tcp_congestion_control *=.*/net.ipv4.tcp_congestion_control = bbr/' "$tuning"
+        grep -q '^net\.ipv4\.tcp_congestion_control' "$tuning" \
+            || echo "net.ipv4.tcp_congestion_control = bbr" >> "$tuning"
+        msg_ok "cc=bbr прописан в $tuning (qdisc оставлен — cake/fq оба ок для BBR)"
+        record_fix "bbr3: cc=bbr in tuning dropin"
+    else
+        write_dropin bbr <<'EOF'
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
+    fi
 
     echo
     echo -e "  ${Y}${BOLD}⚠ Нужна перезагрузка${NC} — BBRv3 подхватится только после неё."
@@ -223,6 +236,6 @@ bbr3_main() {
 }
 
 # запуск напрямую (не через source)
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
     bbr3_main "$@"
 fi
