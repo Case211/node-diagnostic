@@ -713,7 +713,17 @@ check_pmtu() {
         return
     fi
 
-    local hi=1472 lo=576 best=0 mid
+    # 1472 не прошёл. Прежде чем бинпоиском искать порог — убедимся, что ICMP
+    # вообще ходит: иначе best останется 0 и получится бредовый «PMTU=28».
+    if ! pmtu_probe 548; then
+        RES_STATUS=skip
+        RES_SUMMARY="ICMP не проходит — тест невозможен"
+        summary_kv "PMTU" "не измерить (ICMP blocked)"
+        finding 1 pmtu "PMTU не измерить: даже минимальный DF-пакет (576б) не проходит — ICMP порезан фаерволом/хостером. На всякий случай включи tcp_mtu_probing=1 (PMTUD без ICMP тоже слепой)"
+        return
+    fi
+
+    local hi=1472 lo=548 best=548 mid
     for _ in $(seq 1 12); do
         mid=$(( (hi + lo) / 2 ))
         if pmtu_probe "$mid"; then
