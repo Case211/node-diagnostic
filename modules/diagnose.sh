@@ -979,8 +979,8 @@ check_speed_4flow() {
         summary_kv "Speed (4-flow)" "fail"
         return
     fi
-    local mbits
-    mbits=$(echo "scale=0; $total * 8 / $dur / 1000000 / 1" | bc -l 2>/dev/null)
+    # целочисленно на bash — bc тут не нужен (под non-root его может не быть → был пустой mbits и краш [ -lt ])
+    local mbits=$(( total * 8 / dur / 1000000 ))
     echo "4-flow combined: $mbits Mbit/s ($total bytes за ${dur}s)"
 
     summary_kv "Speed (4-flow)" "${mbits} Mbit/s"
@@ -1114,18 +1114,22 @@ check_variance() {
         [ "$v" -lt "$min" ] && min=$v
         [ "$v" -gt "$max" ] && max=$v
     done
-    local ratio
-    ratio=$(echo "scale=1; $max / ($min > 0 ? $min : 1)" | bc -l)
+    # ratio с одним знаком, целочисленно на bash. bc НЕ имеет тернарника ?: (ни GNU, ни busybox) —
+    # прежняя строка через bc всегда падала с syntax error, ratio оставался пустым, а пороги ниже
+    # (тоже на bc) не срабатывали → детект троттлинга был мёртв. min тут >0 (при fails≥3 уже return).
+    [ "$min" -le 0 ] && min=1
+    local r10=$(( max * 10 / min ))            # напр. 111/79 → 14  (=1.4)
+    local ratio="${r10%?}.${r10#"${r10%?}"}"   # 14 → "1.4"
     echo "min=${min} max=${max} ratio=${ratio}x"
 
     summary_kv "Variance (5x)" "${min}–${max} Mbit/s (${ratio}x)"
 
     RES_STATUS=ok
     RES_SUMMARY="${min}–${max} Mbit/s"
-    if have bc && (( $(echo "$ratio > 3" | bc -l) )); then
+    if [ "$r10" -gt 30 ]; then
         RES_STATUS=bad
         finding 3 variance "Разброс x${ratio} — Google троттлит ASN или PoP-роутинг нестабилен"
-    elif have bc && (( $(echo "$ratio > 2" | bc -l) )); then
+    elif [ "$r10" -gt 20 ]; then
         RES_STATUS=warn
         finding 2 variance "Разброс x${ratio} — нестабильный канал"
     fi
