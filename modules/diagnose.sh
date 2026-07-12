@@ -12,7 +12,7 @@
 # Фиксы вынесены в отдельные модули (optimize/protect/bbr3) — этот скрипт только диагностирует.
 
 set -u
-LANG=C.UTF-8
+export LANG=C.UTF-8   # без export дочерние wc/awk живут в локали юзера — паддинг кириллицы едет
 
 # Версия — единый источник lib/common.sh (диспетчер передаёт через env; standalone —
 # вытягиваем сами; pipe-запуск без репозитория — unknown). Дубля числа тут больше нет.
@@ -241,7 +241,6 @@ ensure_deps() {
         [dig]="dnsutils:bind-utils:bind-tools"
         [nc]="netcat-openbsd:nmap-ncat:netcat-openbsd"
         [curl]="curl:curl:curl"
-        [bc]="bc:bc:bc"
         [ethtool]="ethtool:ethtool:ethtool"
         [conntrack]="conntrack:conntrack-tools:conntrack-tools"
         [jq]="jq:jq:jq"
@@ -376,7 +375,8 @@ check_identify() {
         local loc=${pair%%:*}
         local lat=${pair##*:}
         [ -z "$lat" ] && continue
-        if have bc && (( $(echo "$lat < $real_lat" | bc -l 2>/dev/null || echo 0) )); then
+        # float-сравнение через awk — bc может отсутствовать (и раньше молча ломал этот блок)
+        if awk -v a="$lat" -v b="$real_lat" 'BEGIN{exit !(a<b)}'; then
             real_loc=$loc
             real_lat=$lat
         fi
@@ -385,9 +385,9 @@ check_identify() {
     # Валидация: latency < 10ms = реально рядом, 10-30ms = в регионе, >30ms = непонятно
     local geo_lat_str="?"
     if [ "$real_loc" != "?" ]; then
-        if have bc && (( $(echo "$real_lat < 10" | bc -l 2>/dev/null || echo 0) )); then
+        if awk -v v="$real_lat" 'BEGIN{exit !(v<10)}'; then
             geo_lat_str="${real_loc} (~${real_lat} ms, рядом)"
-        elif have bc && (( $(echo "$real_lat < 30" | bc -l 2>/dev/null || echo 0) )); then
+        elif awk -v v="$real_lat" 'BEGIN{exit !(v<30)}'; then
             geo_lat_str="${real_loc} (~${real_lat} ms, в регионе)"
         else
             geo_lat_str="не определено (все >30ms — туннель/потери искажают)"
@@ -440,18 +440,20 @@ check_cpu() {
     RES_STATUS=ok
     RES_SUMMARY="${nproc}c · load $load · idle ${idle}%"
 
-    if have bc; then
-        if (( $(echo "$idle < 50" | bc -l 2>/dev/null || echo 0) )); then
+    # пороги через awk (float): bc мог отсутствовать — тогда весь блок молча не работал.
+    # Гейт на "?"/пусто обязателен: awk от нечисла даёт 0 → ложный «перегружен»
+    if [ -n "$idle" ] && [ "$idle" != "?" ]; then
+        if awk -v v="$idle" 'BEGIN{exit !(v<50)}'; then
             RES_STATUS=warn
             RES_SUMMARY="$RES_SUMMARY · ⚠ перегружен"
             finding 3 cpu "CPU idle ${idle}% — Xray упирается в шифрование, добавь ядра/перенеси нагрузку"
         fi
-        if (( $(echo "${softirq:-0} > 15" | bc -l 2>/dev/null || echo 0) )); then
+        if awk -v v="${softirq:-0}" 'BEGIN{exit !(v>15)}'; then
             [ "$RES_STATUS" = "ok" ] && RES_STATUS=warn
             RES_SUMMARY="$RES_SUMMARY · softirq ${softirq}%"
             finding 2 cpu "softirq ${softirq}% — настрой RPS/RSS, иначе одно ядро забьёт прерываниями"
         fi
-        if (( $(echo "${iow:-0} > 5" | bc -l 2>/dev/null || echo 0) )); then
+        if awk -v v="${iow:-0}" 'BEGIN{exit !(v>5)}'; then
             finding 2 cpu "iowait ${iow}% — упор в диск (логи Xray? swap?)"
         fi
     fi
@@ -462,6 +464,7 @@ check_mem() {
     free -h
     local avail total pct swap_used
     avail=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+    [ -z "$avail" ] && avail=$(awk '/MemFree/ {print $2}' /proc/meminfo)   # ядра <3.14 без MemAvailable
     total=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     pct=$((100 * avail / total))
     swap_used=$(awk '/SwapTotal/ {t=$2} /SwapFree/ {f=$2} END {print t-f}' /proc/meminfo)
@@ -482,7 +485,8 @@ check_mem() {
 check_nic() {
     local iface mtu drv speed rx_drops tx_drops rx_err tx_err
     iface=$(ip -4 route show default | awk '/default/ {print $5; exit}')
-    mtu=$(ip link show "$iface" | grep -oP 'mtu \K\d+')
+    # без grep -P: busybox grep его не знает (MTU «слеп» на Alpine)
+    mtu=$(ip link show "$iface" 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="mtu") {print $(i+1); exit}}')
     drv=$(have ethtool && ethtool -i "$iface" 2>/dev/null | awk -F': ' '/^driver/ {print $2}')
     speed=$(have ethtool && ethtool "$iface" 2>/dev/null | awk -F': ' '/Speed/ {print $2}')
 
@@ -553,7 +557,7 @@ check_tunnel() {
         local kind=${entry%%:*}
         local iface=${entry##*:}
         local mtu peer
-        mtu=$(ip link show "$iface" 2>/dev/null | grep -oP 'mtu \K\d+')
+        mtu=$(ip link show "$iface" 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="mtu") {print $(i+1); exit}}')
         peer=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet / {print $2}' | head -1)
         echo "  $kind ($iface): MTU=$mtu addr=$peer"
 
@@ -752,6 +756,15 @@ check_pmtu() {
     # 1472 не прошёл. Прежде чем бинпоиском искать порог — убедимся, что ICMP
     # вообще ходит: иначе best останется 0 и получится бредовый «PMTU=28».
     if ! pmtu_probe 548; then
+        # различаем «ICMP порезан» и «ping не умеет -M do» (busybox): пробуем лупбек
+        # shellcheck disable=SC1010  # 'do' — аргумент ping -M (pmtudisc), не ключевое слово
+        if ! ping -M do -s 100 -c 1 -W 1 127.0.0.1 >/dev/null 2>&1; then
+            RES_STATUS=skip
+            RES_SUMMARY="ping без -M do — тест невозможен"
+            summary_kv "PMTU" "не измерить (ping без -M)"
+            finding 1 pmtu "PMTU не измерить: локальный ping не поддерживает -M do (busybox?) — поставь iputils-ping"
+            return
+        fi
         RES_STATUS=skip
         RES_SUMMARY="ICMP не проходит — тест невозможен"
         summary_kv "PMTU" "не измерить (ICMP blocked)"
@@ -999,12 +1012,14 @@ check_bufferbloat() {
     base=$(ping -c 10 -i 0.2 -W 2 -q 1.1.1.1 2>/dev/null | awk -F'/' '/rtt|round-trip/ {print $5}')
     echo "baseline avg: ${base:-?} ms"
 
-    # Считаем сколько реально скачали — иначе тест без нагрузки бессмысленен
-    local size_file
-    size_file=$(mktemp)
-    ( curl "${CURL_FLAGS[@]}" --max-time 12 -sS -o /dev/null \
-        -w "%{size_download}" "https://cachefly.cachefly.net/100mb.test" \
-        > "$size_file" 2>/dev/null ) &
+    # Считаем сколько реально скачали — иначе тест без нагрузки бессмысленен.
+    # Качаем В ФАЙЛ и меряем stat'ом: прежний `-w %{size_download}` терялся, когда
+    # мы убивали curl по дедлайну (kill приходил раньше печати -w), и на каналах
+    # медленнее ~115 Mbit/s тест всегда фейлился «0 bytes».
+    local dl_file
+    dl_file=$(mktemp)
+    ( curl "${CURL_FLAGS[@]}" --max-time 12 -sS -o "$dl_file" \
+        "https://cachefly.cachefly.net/100mb.test" >/dev/null 2>&1 ) &
     local DL=$!
     sleep 1
     under=$(ping -c 12 -i 0.2 -W 2 -q 1.1.1.1 2>/dev/null | awk -F'/' '/rtt|round-trip/ {print $5}')
@@ -1016,8 +1031,8 @@ check_bufferbloat() {
     wait "$DL" 2>/dev/null || true
 
     local downloaded
-    downloaded=$(cat "$size_file" 2>/dev/null || echo 0)
-    rm -f "$size_file"
+    downloaded=$(stat -c '%s' "$dl_file" 2>/dev/null || echo 0)
+    rm -f "$dl_file"
     echo "under load avg: ${under:-?} ms · downloaded ${downloaded} bytes"
 
     # Если download не дошёл хотя бы до 5 МБ — линк не нагрузился, мерять нечего
@@ -1034,8 +1049,10 @@ check_bufferbloat() {
         return
     fi
 
+    # разница float-значений — awk вместо bc (bc может отсутствовать)
     local delta
-    delta=$(echo "scale=0; ($under - $base) / 1" | bc -l 2>/dev/null)
+    delta=$(awk -v a="$under" -v b="$base" 'BEGIN{printf "%.0f", a-b}')
+    [ "$delta" = "-0" ] && delta=0   # printf %.0f от -0.3 даёт «-0» — не пугаем «странной сетью»
 
     # Аккуратный знак (избегаем "+-31 ms")
     local sign
@@ -1059,13 +1076,14 @@ check_bufferbloat() {
         return
     fi
 
-    if have bc && (( $(echo "$delta > 100" | bc -l) )); then
+    # delta здесь целое и ≥0 (минус-ветка вернулась выше) — чистый bash
+    if [ "${delta:-0}" -gt 100 ]; then
         RES_STATUS=bad
         finding 3 bufferbloat "Bufferbloat +${delta} ms — катастрофа, шортсы будут постоянно фризить. Лечится qdisc=cake/fq_codel"
-    elif have bc && (( $(echo "$delta > 50" | bc -l) )); then
+    elif [ "${delta:-0}" -gt 50 ]; then
         RES_STATUS=bad
         finding 3 bufferbloat "Bufferbloat +${delta} ms — большой. Включи qdisc cake"
-    elif have bc && (( $(echo "$delta > 20" | bc -l) )); then
+    elif [ "${delta:-0}" -gt 20 ]; then
         RES_STATUS=warn
         finding 2 bufferbloat "Bufferbloat +${delta} ms — заметный, на грани"
     fi
@@ -1153,7 +1171,7 @@ check_tcp_stats() {
         retrans=$(echo "$snmp_vals" | awk '{print $13}')
     fi
     if [ -n "${out_seg:-}" ] && [ "${out_seg:-0}" -gt 0 ] && [ -n "${retrans:-}" ]; then
-        pct=$(echo "scale=2; $retrans * 100 / $out_seg" | bc -l 2>/dev/null)
+        pct=$(awk -v r="$retrans" -v o="$out_seg" 'BEGIN{printf "%.2f", r*100/o}')
     fi
     echo "InSegs=${seg:-?} OutSegs=${out_seg:-?} Retrans=${retrans:-?} (${pct}%)"
 
@@ -1167,10 +1185,10 @@ check_tcp_stats() {
 
     RES_STATUS=ok
     RES_SUMMARY="${pct}% retrans"
-    if have bc && (( $(echo "$pct > 5" | bc -l 2>/dev/null || echo 0) )); then
+    if awk -v p="$pct" 'BEGIN{exit !(p>5)}'; then
         RES_STATUS=bad
         finding 3 retrans "TCP retrans ${pct}% — очень много, явные потери на маршруте"
-    elif have bc && (( $(echo "$pct > 2" | bc -l 2>/dev/null || echo 0) )); then
+    elif awk -v p="$pct" 'BEGIN{exit !(p>2)}'; then
         RES_STATUS=warn
         finding 2 retrans "TCP retrans ${pct}% — заметные потери на пути"
     fi
@@ -1224,15 +1242,26 @@ check_services() {
     local fails=0 blocked=0 slow=0 ok_count=0 total=0
     local failed_list="" blocked_list="" slow_list=""
 
+    _svc_probe() {
+        local o
+        o=$(curl "${CURL_FLAGS[@]}" -sS -L -o /dev/null --max-time 8 \
+            -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
+            -w "%{http_code}|%{time_starttransfer}" "$1" 2>/dev/null) || true
+        printf '%s' "${o:-000|0}"
+    }
+
     for entry in "${SERVICES[@]}"; do
         local name url flag
         IFS='|' read -r name url flag <<< "$entry"
         total=$((total+1))
         local out code ttfb
-        out=$(curl "${CURL_FLAGS[@]}" -sS -L -o /dev/null --max-time 8 \
-            -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
-            -w "%{http_code}|%{time_starttransfer}" "$url" 2>/dev/null) || out="000|0"
+        out=$(_svc_probe "$url")
         code=${out%%|*}
+        if [ "$code" = "000" ]; then
+            # разовый чих сети/DNS даёт ложное «unreachable» — одна повторная попытка
+            out=$(_svc_probe "$url")
+            code=${out%%|*}
+        fi
         ttfb=$(echo "${out##*|}" | awk '{printf "%.0f", $1 * 1000}')
 
         case "$code" in
