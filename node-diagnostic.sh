@@ -73,9 +73,9 @@ menu() {
         local c; read -r c
         echo
         case "$c" in
-            1) run diagnose ;;
+            1) menu_diagnose ;;
             2) menu_optimize ;;
-            3) run protect ;;
+            3) menu_protect ;;
             4) run bbr3 ;;
             5) run rollback ;;
             0|q|"") echo -e "  ${DIM}выход${NC}"; return 0 ;;
@@ -96,6 +96,37 @@ menu_optimize() {
         d) run optimize --dry-run ;;
         *) run optimize --all ;;
     esac
+}
+
+menu_diagnose() {
+    if [ ! -t 0 ]; then run diagnose; return; fi
+    echo -e "  ${BOLD}Диагностика${NC}"
+    echo -e "    ${DIM}[Enter] полная (~5 мин)   [q] быстрая (~1 мин, без долгих тестов)${NC}"
+    printf "  выбор: "; local c; read -r c
+    case "${c,,}" in
+        q) run diagnose -q ;;
+        *) run diagnose ;;
+    esac
+}
+
+is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+
+menu_protect() {
+    if [ ! -t 0 ]; then run protect; return; fi
+    echo -e "  ${BOLD}Защита ноды${NC} ${DIM}(генерация firewall/fail2ban/SSH — ничего не применяет)${NC}"
+    local pip np
+    while true; do
+        printf "  IP панели Remnawave ${DIM}[Enter — оставить плейсхолдер <PANEL_IP>]${NC}: "
+        read -r pip
+        [ -z "$pip" ] || is_ipv4 "$pip" && break
+        echo -e "    ${Y}это не IPv4-адрес${NC} ${DIM}(firewall.nft ждёт именно IPv4)${NC}"
+    done
+    printf "  NODE_PORT (панель→нода) ${DIM}[Enter — автодетект из .env/docker]${NC}: "
+    read -r np
+    local args=()
+    [ -n "$pip" ] && args+=(--panel-ip "$pip")
+    [ -n "$np" ]  && args+=(--node-port "$np")
+    run protect ${args[@]+"${args[@]}"}
 }
 
 # ── диспетчер ────────────────────────────────────────────────────────

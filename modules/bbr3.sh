@@ -210,9 +210,20 @@ bbr3_menu() {
         echo -e "  ${DIM}Включить BBRv1:${NC} ${BOLD}bash modules/optimize.sh${NC} ${DIM}(fix_sysctl поставит bbr+cake).${NC}"
         return 0
     fi
-    echo -e "  ${DIM}Поставить XanMod-ядро для BBRv3? Это heavy-операция с ручным reboot.${NC}"
-    echo -e "  ${DIM}Сначала посмотри план:${NC} ${BOLD}bash modules/bbr3.sh --install --dry-run${NC}"
-    echo -e "  ${DIM}Установить:${NC} ${BOLD}sudo bash modules/bbr3.sh --install${NC}"
+    if [ -t 0 ]; then
+        echo -e "  ${DIM}XanMod-ядро для BBRv3 — heavy-операция с ручным reboot.${NC}"
+        printf "  ${DIM}[d] показать план (dry-run) · [i] установить · [Enter] назад${NC}: "
+        local c; read -r c
+        echo
+        case "${c,,}" in
+            d) (DRY_RUN=1; bbr3_install) ;;
+            i) bbr3_install ;;   # внутри свой confirm y/N перед установкой
+        esac
+    else
+        echo -e "  ${DIM}Поставить XanMod-ядро для BBRv3? Это heavy-операция с ручным reboot.${NC}"
+        echo -e "  ${DIM}Сначала посмотри план:${NC} ${BOLD}bash modules/bbr3.sh --install --dry-run${NC}"
+        echo -e "  ${DIM}Установить:${NC} ${BOLD}sudo bash modules/bbr3.sh --install${NC}"
+    fi
 }
 
 bbr3_main() {

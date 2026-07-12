@@ -264,12 +264,14 @@ ensure_deps() {
     done
     [ ${#NEED[@]} -eq 0 ] && return
     # индекс пакетов обновляем только когда реально есть что ставить —
-    # иначе каждый прогон диагностики начинался с многосекундного apt-get update
-    if   have apt-get; then apt-get update -qq >/dev/null 2>&1 || true
-    elif have apk;     then apk update -q      >/dev/null 2>&1 || true
+    # иначе каждый прогон диагностики начинался с многосекундного apt-get update.
+    # </dev/null обязателен: с унаследованным TTY debconf считает себя интерактивным
+    # и СЪЕДАЕТ клавиатурный ввод юзера (меню после диагностики зависает на read)
+    if   have apt-get; then apt-get update -qq >/dev/null 2>&1 </dev/null || true
+    elif have apk;     then apk update -q      >/dev/null 2>&1 </dev/null || true
     fi
     # shellcheck disable=SC2086
-    $PKG_INSTALL ${!NEED[*]} >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive $PKG_INSTALL ${!NEED[*]} >/dev/null 2>&1 </dev/null || true
 }
 
 # ════════════════════════════════════════════════════════════════════
