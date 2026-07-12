@@ -123,8 +123,12 @@ load_module() {
 verify_sysctl() {
     local key="$1" want="$2" got
     got=$(sysctl -n "$key" 2>/dev/null)
-    # нормализуем пробелы (для tcp_rmem "a b c")
-    [ "$(echo "$got")" = "$(echo "$want")" ]
+    # multi-value ключи (tcp_rmem) sysctl отдаёт с ТАБАМИ, drop-in пишем с пробелами —
+    # echo в кавычках их не схлопывает; сравниваем по полям
+    local -a g=() w=()
+    read -ra g <<< "$got"
+    read -ra w <<< "$want"
+    [ "${g[*]}" = "${w[*]}" ]
 }
 
 # ────────────────────────────────────────────────────────────────────
