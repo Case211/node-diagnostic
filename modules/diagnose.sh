@@ -1188,20 +1188,21 @@ check_services() {
         "WhatsApp|https://web.whatsapp.com/"
         "Signal|https://signal.org/"
         "ChatGPT|https://chat.openai.com/"
-        "Claude|https://claude.ai/"
+        "Claude|https://claude.ai/|bw"
         "Gemini|https://gemini.google.com/"
         "Spotify|https://open.spotify.com/"
         "Steam|https://store.steampowered.com/"
         "GitHub|https://github.com/"
-        "Reddit|https://www.reddit.com/"
+        "Reddit|https://www.reddit.com/|bw"
     )
+    # bw = bot-wall: фронт отдаёт 403 любому curl (анти-бот), это НЕ блок конкретного IP
 
     local fails=0 blocked=0 slow=0 ok_count=0 total=0
     local failed_list="" blocked_list="" slow_list=""
 
     for entry in "${SERVICES[@]}"; do
-        local name=${entry%%|*}
-        local url=${entry##*|}
+        local name url flag
+        IFS='|' read -r name url flag <<< "$entry"
         total=$((total+1))
         local out code ttfb
         out=$(curl "${CURL_FLAGS[@]}" -sS -L -o /dev/null --max-time 8 \
@@ -1221,7 +1222,16 @@ check_services() {
                     printf "  %-15s %s %3sms\n" "$name" "$code" "$ttfb"
                 fi
                 ;;
-            403|429|451)
+            403|429)
+                if [ "$flag" = "bw" ]; then
+                    printf "  %-15s ${DIM}%s bot-wall (анти-бот, не блок IP)${NC}\n" "$name" "$code"
+                else
+                    blocked=$((blocked+1))
+                    blocked_list="$blocked_list $name($code)"
+                    printf "  %-15s ${R}%s blocked${NC}\n" "$name" "$code"
+                fi
+                ;;
+            451)
                 blocked=$((blocked+1))
                 blocked_list="$blocked_list $name($code)"
                 printf "  %-15s ${R}%s blocked${NC}\n" "$name" "$code"
