@@ -861,9 +861,11 @@ check_quic() {
 # 13. Скорость: одиночный поток (Cachefly 100 МБ)
 check_speed_single() {
     local out spd_bps spd_mbit code size
+    # || true, НЕ || out="": при exit 28 (max-time) curl уже напечатал -w с реальной
+    # средней скоростью — затирать её значит объявлять fail любому каналу <~70 Mbit/s
     out=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 12 \
         -w "%{speed_download}|%{size_download}|%{time_total}|%{http_code}" \
-        "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || out=""
+        "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || true
     echo "raw: $out"
     spd_bps=$(echo "$out" | cut -d'|' -f1)
     size=$(echo    "$out" | cut -d'|' -f2)
@@ -1032,8 +1034,9 @@ check_variance() {
     local fails=0
     for i in 1 2 3 4 5; do
         local spd spd_int
+        # || true: exit 28 = «не докачал за 5с», но средняя скорость в -w честная
         spd=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 5 \
-            -w "%{speed_download}" "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || spd="0"
+            -w "%{speed_download}" "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || true
         spd_int=$(printf '%.0f' "${spd:-0}" 2>/dev/null || echo 0)
         if [ -z "$spd" ] || [ "${spd_int:-0}" -lt 10000 ]; then
             fails=$((fails+1))
@@ -1256,7 +1259,7 @@ check_cdn_multi() {
         local spd code
         local out
         out=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 8 \
-            -w "%{speed_download}|%{http_code}" "$url" 2>/dev/null) || out="0|000"
+            -w "%{speed_download}|%{http_code}" "$url" 2>/dev/null) || true
         spd=${out%%|*}
         code=${out##*|}
         # curl возвращает "0.000" при таймауте/ошибке — нормализуем к целому
