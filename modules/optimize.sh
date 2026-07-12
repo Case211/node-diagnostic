@@ -189,7 +189,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do echo $mask > \$q/rps_cpus; echo 4096 > \$q/rps_flow_cnt; done; for q in /sys/class/net/$iface/queues/tx-*; do echo $mask > \$q/xps_cpus; done'
+ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do echo $mask > \$\$q/rps_cpus; echo 4096 > \$\$q/rps_flow_cnt; done; for q in /sys/class/net/$iface/queues/tx-*; do echo $mask > \$\$q/xps_cpus; done'
 [Install]
 WantedBy=multi-user.target
 UNIT
