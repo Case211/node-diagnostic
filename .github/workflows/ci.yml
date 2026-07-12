@@ -34,3 +34,13 @@ jobs:
             apt-get update -qq
             apt-get install -y -qq bash iproute2 procps nftables python3 gawk grep sed coreutils >/dev/null
             bash tests/smoke.sh'
+
+  smoke-alpine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke in alpine:3.19 (busybox-окружение)
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w alpine:3.19 sh -c '
+            apk add -q bash nftables python3 >/dev/null
+            bash tests/smoke.sh'
