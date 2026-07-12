@@ -22,9 +22,12 @@ detect_node_port() {
         v=$(awk -F= '/^[[:space:]]*NODE_PORT[[:space:]]*=/{gsub(/[" ]/,"",$2);print $2;exit}' "$f")
         [ -n "$v" ] && { echo "$v"; return 0; }
     done
-    # из запущенного контейнера remnanode
+    # из запущенного контейнера remnanode — ТОЛЬКО он: первый попавшийся published-порт
+    # чужого контейнера (Caddy и т.п.) уехал бы в firewall как NODE_PORT.
+    # Берём хостовую часть маппинга (куда реально стучится панель), не внутреннюю.
     if have docker; then
-        v=$(docker ps --format '{{.Ports}}' 2>/dev/null | grep -oE '0.0.0.0:[0-9]+->[0-9]+' | head -1 | grep -oE '->[0-9]+' | tr -d '->')
+        v=$(docker ps --filter name=remnanode --format '{{.Ports}}' 2>/dev/null \
+            | grep -oE ':[0-9]+->' | head -1 | tr -cd '0-9')
         [ -n "$v" ] && { echo "$v"; return 0; }
     fi
     return 1
