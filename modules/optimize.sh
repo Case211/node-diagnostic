@@ -197,6 +197,11 @@ opt_rps() {
     write_dropin rps <<'EOF'
 net.core.rps_sock_flow_entries = 32768
 EOF
+    if ! have systemctl || [ ! -d /etc/systemd/system ]; then
+        msg_warn "нет systemd — RPS/XPS не переживут reboot (повтори optimize --rps после перезагрузки или добавь в свой автозапуск)"
+        record_fix "RPS/RFS/XPS mask=$mask on $iface (без persist: нет systemd)"
+        return 0
+    fi
     cat > /etc/systemd/system/node-diagnostic-rps.service <<UNIT
 [Unit]
 Description=node-diagnostic RPS/RFS/XPS on $iface
@@ -235,6 +240,11 @@ opt_nic() {
     ip link set "$iface" txqueuelen 10000 2>/dev/null || true
     msg_ok "ring/offloads/txqueuelen применены"
 
+    if ! have systemctl || [ ! -d /etc/systemd/system ]; then
+        msg_warn "нет systemd — NIC-тюнинг не переживёт reboot (повтори optimize --nic после перезагрузки)"
+        record_fix "NIC ring/offloads on $iface (без persist: нет systemd)"
+        return 0
+    fi
     cat > /etc/systemd/system/node-diagnostic-nic.service <<UNIT
 [Unit]
 Description=node-diagnostic NIC tuning on $iface
