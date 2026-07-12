@@ -44,7 +44,8 @@ echo
 say "Готово. Запуск:"
 say "  sudo bash $DEST/node-diagnostic.sh"
 
-# запущено интерактивно (не через pipe) — сразу открыть меню
-if [ -t 0 ] && [ -t 1 ]; then
-    exec bash "$DEST/node-diagnostic.sh" "$@"
+# В терминале — сразу открыть меню. При `curl | bash` stdin занят пайпом,
+# поэтому подключаем клавиатуру через /dev/tty (иначе меню не открылось бы никогда).
+if [ -t 1 ] && [ -r /dev/tty ]; then
+    exec bash "$DEST/node-diagnostic.sh" "$@" </dev/tty
 fi
