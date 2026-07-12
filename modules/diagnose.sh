@@ -590,9 +590,9 @@ check_tunnel() {
 # 5. TCP congestion control
 check_tcp_cc() {
     local cc qdisc avail
-    cc=$(sysctl -n net.ipv4.tcp_congestion_control)
-    qdisc=$(sysctl -n net.core.default_qdisc)
-    avail=$(sysctl -n net.ipv4.tcp_available_congestion_control)
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
     echo "cc=$cc  qdisc=$qdisc"
     echo "available=$avail"
 
