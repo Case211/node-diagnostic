@@ -262,6 +262,22 @@ ensure_deps() {
 check_identify() {
     local h ip4 ip6 kern distro virt up
     h=$(hostname)
+
+    # --no-net: без внешних проб (ipify/гео-базы/latency до IX) — только локальные факты
+    if [ "$NO_NET" = "1" ]; then
+        kern=$(uname -sr)
+        distro=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || echo unknown)
+        virt=$(systemd-detect-virt 2>/dev/null || echo unknown)
+        up=$(uptime -p 2>/dev/null || echo "?")
+        echo "Hostname: $h"
+        echo "Kernel: $kern  Distro: $distro  Virt: $virt  Uptime: $up"
+        summary_kv "Хост" "$h"
+        summary_kv "Ядро" "$kern · $distro"
+        RES_STATUS=ok
+        RES_SUMMARY="$h · offline (--no-net)"
+        return
+    fi
+
     ip4=$(curl "${CURL_FLAGS[@]}" -s --max-time 5 https://api.ipify.org || echo "")
     ip6=$(curl --connect-timeout 5 -6 -s --max-time 5 https://api64.ipify.org 2>/dev/null || echo "")
 
