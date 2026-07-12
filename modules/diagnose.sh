@@ -831,11 +831,13 @@ check_mtr() {
 
 # 12. UDP / QUIC / HTTP/3
 check_quic() {
-    local udp_ok=0 h3_ok=0
+    # udp_ok: 1=прошёл, 0=не прошёл, -1=нечем проверить (нет nc — это НЕ блокировка)
+    local udp_ok=-1 h3_ok=0
     if have nc; then
+        udp_ok=0
         timeout 3 nc -u -z 8.8.8.8 443 >/dev/null 2>&1 && udp_ok=1
     fi
-    echo "UDP/443 → 8.8.8.8: $([ $udp_ok -eq 1 ] && echo OK || echo FAIL)"
+    echo "UDP/443 → 8.8.8.8: $([ $udp_ok -eq 1 ] && echo OK || { [ $udp_ok -eq 0 ] && echo FAIL || echo "SKIP (нет nc)"; })"
 
     if curl --help all 2>/dev/null | grep -q -- '--http3'; then
         if curl --http3 -sS -o /dev/null --max-time 6 https://www.youtube.com >/dev/null 2>&1; then
@@ -844,7 +846,10 @@ check_quic() {
         fi
     fi
 
-    summary_kv "QUIC/HTTP3" "udp=$([ $udp_ok = 1 ] && echo on || echo off) http3=$([ $h3_ok = 1 ] && echo on || echo off)"
+    local udp_label="off"
+    [ $udp_ok -eq 1 ]  && udp_label="on"
+    [ $udp_ok -eq -1 ] && udp_label="?"
+    summary_kv "QUIC/HTTP3" "udp=$udp_label http3=$([ $h3_ok = 1 ] && echo on || echo off)"
 
     RES_STATUS=ok
     RES_SUMMARY="udp ok"
@@ -852,6 +857,8 @@ check_quic() {
         RES_STATUS=warn
         RES_SUMMARY="UDP/443 заблокирован?"
         finding 2 quic "UDP/443 не проходит — клиенты валятся на TCP, шортсы дольше стартуют"
+    elif [ $udp_ok -eq -1 ]; then
+        RES_SUMMARY="udp-проба пропущена (нет nc)"
     fi
     if [ $h3_ok -eq 0 ] && curl --help all 2>/dev/null | grep -q -- '--http3'; then
         finding 1 quic "curl --http3 не отвечает — QUIC до Google ослаб"
