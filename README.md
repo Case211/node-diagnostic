@@ -112,6 +112,8 @@ sudo bash node-diagnostic.sh protect --panel-ip <IP_панели> --node-port <N
 # → /root/node-diagnostic-protect/  (открыть APPLY.txt)
 ```
 
+Из меню то же самое без флагов: пункт **[3]** спросит IP панели и NODE_PORT (Enter — автодетект/плейсхолдер).
+
 ## `bbr3` — TCP BBRv3 через XanMod
 
 Mainline-ядро отдаёт только BBRv1; BBRv3 приходит с кастомным ядром **XanMod**. Модуль:
