@@ -111,7 +111,9 @@ table inet node_protect {
         tcp dport $ssh_port ip saddr $ssh_ip accept
 
         # 443 — публичный вход. Per-IP лимит одновременных соединений и SYN-rate.
-        tcp dport 443 ct count over $CONN_LIMIT drop
+        # (ct count вне meter считал бы ВСЕ соединения порта разом — душил бы ноду целиком)
+        tcp dport 443 ct state new \\
+            meter conn443 { ip saddr ct count over $CONN_LIMIT } drop
         tcp dport 443 ct state new \\
             meter syn443 { ip saddr limit rate over ${SYN_RATE}/second burst $((SYN_RATE*2)) packets } drop
         tcp dport 443 accept
