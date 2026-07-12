@@ -154,11 +154,24 @@ EOF
 }
 
 # ── 3. RPS + RFS + XPS (размазать softirq/поток по CPU) ──────────────
+# CPU-битмаска для rps_cpus/xps_cpus. Ядро ждёт группы по 32 бита через запятую,
+# старшее слово первым. Наивный printf '%x' $(( (1<<n)-1 )) ломался при n≥64
+# (1<<64 в 64-битном bash = переполнение → mask=0, RPS выключался вовсе) и давал
+# одно слово >32 бит при 33≤n≤63, которое ядро могло отвергнуть.
+cpu_mask() {
+    local n=$1
+    local full=$(( n / 32 )) rem=$(( n % 32 )) words=() i
+    [ "$rem" -gt 0 ] && words+=("$(printf '%x' $(( (1 << rem) - 1 )))")
+    for ((i=0; i<full; i++)); do words+=("ffffffff"); done
+    [ ${#words[@]} -eq 0 ] && words=("0")
+    local IFS=,; echo "${words[*]}"
+}
+
 # shellcheck disable=SC2120  # iface — опциональный аргумент (обычно берётся из default_iface)
 opt_rps() {
     local iface="${1:-$(default_iface)}"
     [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
-    local n mask; n=$(nproc); mask=$(printf '%x' $(( (1 << n) - 1 )))
+    local n mask; n=$(nproc); mask=$(cpu_mask "$n")
     echo -e "  ${BOLD}RPS/RFS/XPS${NC} ${DIM}mask=$mask на $iface${NC}"
 
     if [ "$DRY_RUN" = "1" ]; then
