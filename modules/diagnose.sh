@@ -19,11 +19,13 @@ LANG=C.UTF-8
 # Палитра / форматирование
 # ────────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
+    IS_TTY=1
     R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'
     B=$'\033[0;34m'; C=$'\033[0;36m'; M=$'\033[0;35m'
     BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
     CLR_LINE=$'\033[K'
 else
+    IS_TTY=0
     R=""; G=""; Y=""; B=""; C=""; M=""; BOLD=""; DIM=""; NC=""; CLR_LINE=""
 fi
 
@@ -121,7 +123,9 @@ CURL_FLAGS=(--connect-timeout 5 --retry 0 -4)
 print_line() {
     local i=$1 total=$2 icon=$3 name=$4 tail=$5
     local pct=$(( i * 100 / total ))
-    printf "\r${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} %b %-26s ${DIM}%s${NC}\n" \
+    local cr=""
+    [ "$IS_TTY" = "1" ] && cr=$'\r'   # в пайпе/логе \r только мусорит
+    printf "${cr}${CLR_LINE}${DIM}[%2d/%2d %3d%%]${NC} %b %-26s ${DIM}%s${NC}\n" \
         "$i" "$total" "$pct" "$icon" "$name" "$tail"
 }
 
@@ -192,13 +196,16 @@ run_check() {
 
     local start frame=0
     start=$(date +%s)
-    # Polling каждые ~100ms — спиннер выглядит живым, не дёрганым
-    while kill -0 "$pid" 2>/dev/null; do
-        local el=$(( $(date +%s) - start ))
-        print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$frame" "$el"
-        sleep 0.1
-        frame=$(( frame + 1 ))
-    done
+    # Спиннер — только на живом терминале: в пайп/лог он льёт кадры 10 раз в секунду
+    if [ "$IS_TTY" = "1" ]; then
+        # Polling каждые ~100ms — спиннер выглядит живым, не дёрганым
+        while kill -0 "$pid" 2>/dev/null; do
+            local el=$(( $(date +%s) - start ))
+            print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$frame" "$el"
+            sleep 0.1
+            frame=$(( frame + 1 ))
+        done
+    fi
     wait "$pid" 2>/dev/null || true
 
     local dur=$(( $(date +%s) - start ))
