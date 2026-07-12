@@ -240,11 +240,9 @@ ensure_deps() {
     )
     local PKG_INSTALL="" IDX=0
     if   have apt-get; then PKG_INSTALL="apt-get install -y -qq"; IDX=0
-                            apt-get update -qq >/dev/null 2>&1 || true
     elif have dnf;     then PKG_INSTALL="dnf install -y -q";      IDX=1
     elif have yum;     then PKG_INSTALL="yum install -y -q";      IDX=1
     elif have apk;     then PKG_INSTALL="apk add --quiet";        IDX=2
-                            apk update -q >/dev/null 2>&1 || true
     fi
     [ -z "$PKG_INSTALL" ] && return
     [ "$EUID" -ne 0 ] && return
@@ -257,6 +255,11 @@ ensure_deps() {
         fi
     done
     [ ${#NEED[@]} -eq 0 ] && return
+    # индекс пакетов обновляем только когда реально есть что ставить —
+    # иначе каждый прогон диагностики начинался с многосекундного apt-get update
+    if   have apt-get; then apt-get update -qq >/dev/null 2>&1 || true
+    elif have apk;     then apk update -q      >/dev/null 2>&1 || true
+    fi
     # shellcheck disable=SC2086
     $PKG_INSTALL ${!NEED[*]} >/dev/null 2>&1 || true
 }
