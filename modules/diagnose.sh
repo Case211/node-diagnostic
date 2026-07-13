@@ -1749,11 +1749,11 @@ verdict_st=""; verdict_text=""; verdict_sub=""
 if [ "$bad_count" = "0" ] && [ "$warn_count" = "0" ]; then
     verdict_st=ok;   verdict_text="нода в порядке";        verdict_sub="видео и сервисы должны работать без проблем"
 elif [ "$bad_count" = "0" ]; then
-    verdict_st=warn; verdict_text="рабочее с замечаниями"; verdict_sub="$warn_count предупреждений · поедет, но не идеально"
-elif [ "$bad_count" -le 1 ]; then
-    verdict_st=warn; verdict_text="проблемы есть";         verdict_sub="$bad_count критичных · $warn_count предупреждений"
+    verdict_st=warn; verdict_text="рабочее с замечаниями"
+    verdict_sub="$warn_count $(plural_ru "$warn_count" предупреждение предупреждения предупреждений) · поедет, но не идеально"
 else
-    verdict_st=bad;  verdict_text="непригодна для видео";  verdict_sub="$bad_count критичных · $warn_count предупреждений"
+    [ "$bad_count" -le 1 ] && { verdict_st=warn; verdict_text="проблемы есть"; } || { verdict_st=bad; verdict_text="непригодна для видео"; }
+    verdict_sub="$bad_count $(plural_ru "$bad_count" критичная критичные критичных) · $warn_count $(plural_ru "$warn_count" предупреждение предупреждения предупреждений)"
 fi
 vcol=$(sem_color "$verdict_st"); vico=$(sem_icon "$verdict_st")
 box_top "ВЕРДИКТ"
