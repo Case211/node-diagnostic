@@ -29,7 +29,10 @@ fi
 # Смысл, а не цвет: ok/warn/bad/info/accent/muted + иконки под каждым статусом.
 # Кросс-модульные (diagnose/optimize/protect/node-diagnostic) — export снимает SC2034.
 C_OK=$G; C_WARN=$Y; C_BAD=$R; C_INFO=$B; C_ACCENT=$C; C_MUTED=$DIM
-I_OK="✓"; I_WARN="⚠"; I_BAD="✗"; I_INFO="·"; I_SKIP="·"
+# ⚠ (U+26A0) по Unicode default = emoji-presentation → 2 колонки в kitty/wezterm/iTerm2
+# и т.п. VS15 (U+FE0E) форсит text-presentation = гарантированно 1 колонка везде.
+# vlen ниже игнорирует вариационные селекторы, чтобы ширина совпала с рендером.
+I_OK="✓"; I_WARN=$'⚠︎'; I_BAD="✗"; I_INFO="·"; I_SKIP="·"
 export C_OK C_WARN C_BAD C_INFO C_ACCENT C_MUTED I_OK I_WARN I_BAD I_INFO I_SKIP
 # статус (ok/warn/bad/skip/info) → цвет и иконка одним источником
 sem_color() { case "$1" in ok) printf '%s' "$G";; warn) printf '%s' "$Y";; bad) printf '%s' "$R";; info) printf '%s' "$B";; *) printf '%s' "$DIM";; esac; }
@@ -41,7 +44,11 @@ sem_icon()  { case "$1" in ok) printf '%s' "$I_OK";; warn) printf '%s' "$I_WARN"
 ND_ESC=$'\033'
 shopt -s extglob 2>/dev/null || true
 strip_ansi() { local s=$1; printf '%s' "${s//${ND_ESC}\[*([0-9;])m/}"; }
-vlen()       { local s; s=$(strip_ansi "$1"); printf '%s' "${#s}"; }
+vlen() {
+    local s; s=$(strip_ansi "$1")
+    s=${s//$'︎'/}; s=${s//$'️'/}   # вариационные селекторы zero-width — не считать
+    printf '%s' "${#s}"
+}
 
 ND_BOX_W="${ND_BOX_W:-58}"          # внутренняя ширина карточки (контент)
 # горизонтальная линия нужной длины (режем заранее готовую по символам — UTF-8-safe)
