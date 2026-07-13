@@ -60,7 +60,7 @@ protect_generate() {
     [ -z "$ph_ssh" ]   && ph_ssh="<YOUR_SSH_IP>"
 
     echo
-    echo -e "  ${BOLD}Генерация защиты ноды (Remnawave)${NC}"
+    ui_head "Генерация защиты ноды" "Remnawave · только генерация файлов"
     echo -e "    ${DIM}SSH-порт:${NC} $ssh_port   ${DIM}твой SSH-IP:${NC} $ph_ssh"
     echo -e "    ${DIM}NODE_PORT (control-API):${NC} ${NODE_PORT:-<не найден, укажи --node-port>}"
     echo -e "    ${DIM}IP панели:${NC} $ph_panel"

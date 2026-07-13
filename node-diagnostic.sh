@@ -33,7 +33,7 @@ run() { local m="$1"; shift; bash "$MOD/$m.sh" "$@"; }
 banner() {
     echo
     echo -e "  ${C}${BOLD}NODE DIAGNOSTIC${NC}  ${DIM}v${ND_VERSION} · toolkit${NC}"
-    echo -e "  ${DIM}─────────────────────────────────────────────────────${NC}"
+    ui_rule
     echo -e "  ${DIM}$(date -u +'%Y-%m-%d %H:%M UTC') · $(hostname) · $(detect_virt)${NC}"
 }
 
@@ -91,34 +91,41 @@ menu() {
 
 # Что тулкит наложил на систему + ключевое состояние сети (read-only)
 show_status() {
-    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}Состояние ноды${NC}"
-    echo -e "    ${DIM}версия тулкита:${NC} $ND_VERSION"
-    echo -e "    ${DIM}ядро:${NC}          $(uname -r)"
-    local cc qdisc
-    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')
-    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')
-    echo -e "    ${DIM}congestion:${NC}    $cc + $qdisc"
+    echo
+    local cc qdisc cc_disp
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    cc_disp="${cc:-?}"; [ -n "$qdisc" ] && cc_disp="$cc + $qdisc"
+    box_top "СОСТОЯНИЕ НОДЫ"
+    box_kv "Версия" "$ND_VERSION"
+    box_kv "Ядро" "$(uname -r)"
+    box_kv "Congestion" "$cc_disp"
+    box_bottom
     echo
 
-    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}Наложенные артефакты${NC}"
+    box_top "НАЛОЖЕННЫЕ АРТЕФАКТЫ"
     local found=0 f
     for f in /etc/sysctl.d/${ND_DROPIN_PREFIX}-*.conf \
              /etc/security/limits.d/99-node-diagnostic.conf \
              /etc/modules-load.d/${ND_DROPIN_PREFIX}.conf; do
-        [ -e "$f" ] && { echo -e "    ${G}·${NC} $f"; found=1; }
+        [ -e "$f" ] && { box_row "${C_OK}${I_OK}${NC} ${f}"; found=1; }
     done
     for svc in node-diagnostic-rps node-diagnostic-nic; do
-        [ -e "/etc/systemd/system/$svc.service" ] && { echo -e "    ${G}·${NC} $svc.service"; found=1; }
+        [ -e "/etc/systemd/system/$svc.service" ] && { box_row "${C_OK}${I_OK}${NC} ${svc}.service"; found=1; }
     done
     if have iptables && iptables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
-        echo -e "    ${G}·${NC} iptables MSS clamp (OUTPUT)"; found=1
+        box_row "${C_OK}${I_OK}${NC} iptables MSS clamp (OUTPUT)"; found=1
     fi
-    [ "$found" = "0" ] && echo -e "    ${DIM}ничего не наложено (optimize не запускался)${NC}"
+    [ "$found" = "0" ] && box_row "${DIM}ничего не наложено (optimize не запускался)${NC}"
+    box_bottom
     echo
 
     if [ -f "$FIX_LOG" ]; then
-        echo -e "  ${C}${BOLD}▌${NC} ${BOLD}Журнал применённого${NC} ${DIM}($FIX_LOG, последние 5)${NC}"
-        tail -5 "$FIX_LOG" 2>/dev/null | sed 's/^/    /'
+        box_top "ЖУРНАЛ ПРИМЕНЁННОГО"
+        tail -5 "$FIX_LOG" 2>/dev/null | while IFS= read -r line; do
+            box_row "${DIM}$(ui_fit "$line" "$ND_BOX_W")${NC}"
+        done
+        box_bottom
     fi
 }
 

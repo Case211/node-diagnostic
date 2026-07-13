@@ -14,28 +14,18 @@
 set -u
 export LANG=C.UTF-8   # без export дочерние wc/awk живут в локали юзера — паддинг кириллицы едет
 
-# Версия — единый источник lib/common.sh (диспетчер передаёт через env; standalone —
-# вытягиваем сами; pipe-запуск без репозитория — unknown). Дубля числа тут больше нет.
-SCRIPT_VERSION="${ND_VERSION:-}"
-if [ -z "$SCRIPT_VERSION" ]; then
-    SCRIPT_VERSION=$(sed -n 's/^ND_VERSION="\(.*\)"/\1/p' \
-        "$(dirname "${BASH_SOURCE[0]:-$0}")/../lib/common.sh" 2>/dev/null)
-    SCRIPT_VERSION="${SCRIPT_VERSION:-unknown}"
+# Палитра, семантические токены и box-примитивы — из lib/common.sh (единый визуальный язык).
+# Диспетчер уже подключил его (ND_COMMON_LOADED); при прямом запуске — подключаем сами.
+if [ -z "${ND_COMMON_LOADED:-}" ]; then
+    # shellcheck source=../lib/common.sh
+    source "$(dirname "${BASH_SOURCE[0]:-$0}")/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
-# ────────────────────────────────────────────────────────────────────
-# Палитра / форматирование
-# ────────────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-    IS_TTY=1
-    R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'
-    B=$'\033[0;34m'; C=$'\033[0;36m'; M=$'\033[0;35m'
-    BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
-    CLR_LINE=$'\033[K'
-else
-    IS_TTY=0
-    R=""; G=""; Y=""; B=""; C=""; M=""; BOLD=""; DIM=""; NC=""; CLR_LINE=""
-fi
+# IS_TTY нужен для гейта спиннера (common даёт цвета, но не этот флаг)
+if [ -t 1 ]; then IS_TTY=1; else IS_TTY=0; fi
+
+SCRIPT_VERSION="${ND_VERSION:-unknown}"
 
 VERBOSE=0
 APPLY_MODE="prompt"   # prompt | all | none
@@ -615,10 +605,13 @@ check_tcp_cc() {
     echo "cc=$cc  qdisc=$qdisc"
     echo "available=$avail"
 
-    summary_kv "TCP CC" "$cc + $qdisc"
+    # без qdisc не рисуем висячий «cc + » (в контейнере/на part-ядрах ключа нет)
+    local cc_disp="${cc:-?}"
+    [ -n "$qdisc" ] && cc_disp="$cc + $qdisc"
+    summary_kv "TCP CC" "$cc_disp"
 
     RES_STATUS=ok
-    RES_SUMMARY="$cc + $qdisc"
+    RES_SUMMARY="$cc_disp"
     if [ "$cc" != "bbr" ]; then
         if echo "$avail" | grep -q bbr; then
             RES_STATUS=warn
@@ -1589,7 +1582,7 @@ check_listen() {
 # Header
 echo
 echo -e "  ${C}${BOLD}NODE DIAGNOSTIC${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
-echo -e "  ${DIM}─────────────────────────────────────────────────────${NC}"
+ui_rule
 echo -e "  ${DIM}$(date -u +'%Y-%m-%d %H:%M UTC') · $(hostname)${NC}"
 echo
 
@@ -1717,94 +1710,57 @@ done < "$FINDINGS_FILE"
 score=$(( 100 - penalty * 5 ))
 [ "$score" -lt 0 ] && score=0
 
-# Хелперы для рендера
-print_section_header() {
-    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}$1${NC}"
-}
-
-print_kv_aligned() {
-    local k="$1" v="$2"
-    local clen pad
-    clen=$(printf '%s' "$k" | wc -m)
-    pad=$(( 18 - clen ))
-    [ "$pad" -lt 0 ] && pad=0
-    printf "    ${DIM}%s%*s${NC}  %s\n" "$k" "$pad" "" "$v"
-}
-
-# Score-gauge: 20-сегментный бар с цветом по диапазону
-print_score_gauge() {
-    local s=$1
-    local filled=$(( s * 20 / 100 ))
-    [ "$filled" -gt 20 ] && filled=20
-    local empty=$(( 20 - filled ))
-    local color
-    if   [ "$s" -ge 80 ]; then color=$G
-    elif [ "$s" -ge 50 ]; then color=$Y
-    else                       color=$R
-    fi
-    local bar=""
-    local i
+# Score-бар: 20 сегментов, цвет по диапазону. Возвращает готовую цветную строку.
+score_bar() {
+    local s=$1 filled empty color bar="" i
+    filled=$(( s * 20 / 100 )); [ "$filled" -gt 20 ] && filled=20
+    empty=$(( 20 - filled ))
+    if   [ "$s" -ge 80 ]; then color=$C_OK
+    elif [ "$s" -ge 50 ]; then color=$C_WARN
+    else                       color=$C_BAD; fi
     for ((i=0; i<filled; i++)); do bar="${bar}█"; done
-    for ((i=0; i<empty;  i++)); do bar="${bar}░"; done
-    printf "  %sScore%s  ${color}%s${NC}  ${BOLD}%3d${NC}${DIM}/100${NC}" \
-        "$BOLD" "$NC" "$bar" "$s"
+    printf '%s%s%s' "$color" "$bar" "$DIM"
+    bar=""; for ((i=0; i<empty; i++)); do bar="${bar}░"; done
+    printf '%s%s' "$bar" "$NC"
 }
 
-# Заголовок раздела
-echo
-echo -e "${DIM}  ─────────────────────────────────  СВОДКА  ─────────────────────────────────${NC}"
-echo
-
-# Группируем сводку по категориям
-section_started=""
-print_category() {
-    local cat=$1 title=$2
-    local has_keys=0
+# Категория сводки → карточка (box-примитивы из common.sh)
+render_card() {
+    local cat=$1 title=$2 rows=() k v
     while IFS='|' read -r k v; do
-        if [ "$(classify_kv "$k")" = "$cat" ]; then
-            if [ "$has_keys" = "0" ]; then
-                [ -n "$section_started" ] && echo
-                print_section_header "$title"
-                has_keys=1
-                section_started=1
-            fi
-            print_kv_aligned "$k" "$v"
-        fi
+        [ "$(classify_kv "$k")" = "$cat" ] && rows+=("$k|$v")
     done < "$SUMMARY_FILE"
+    [ ${#rows[@]} -eq 0 ] && return
+    box_top "$title"
+    local pair
+    for pair in "${rows[@]}"; do box_kv "${pair%%|*}" "${pair#*|}"; done
+    box_bottom
+    echo
 }
-print_category sys  "Система"
-print_category net  "Сеть"
-print_category perf "Производительность"
-print_category svc  "Сервисы и репутация"
 
-# Score gauge + verdict
 echo
-echo
-print_score_gauge "$score"
-echo
-echo
+render_card sys  "СИСТЕМА"
+render_card net  "СЕТЬ"
+render_card perf "ПРОИЗВОДИТЕЛЬНОСТЬ"
+render_card svc  "СЕРВИСЫ И РЕПУТАЦИЯ"
 
-# Вердикт
-verdict_icon=""; verdict_color=""; verdict_text=""; verdict_sub=""
+# ── Вердикт + score в одной карточке ──
+verdict_st=""; verdict_text=""; verdict_sub=""
 if [ "$bad_count" = "0" ] && [ "$warn_count" = "0" ]; then
-    verdict_icon="✓"; verdict_color=$G
-    verdict_text="нода в порядке"
-    verdict_sub="видео и сервисы должны работать без проблем"
+    verdict_st=ok;   verdict_text="нода в порядке";        verdict_sub="видео и сервисы должны работать без проблем"
 elif [ "$bad_count" = "0" ]; then
-    verdict_icon="⚠"; verdict_color=$Y
-    verdict_text="рабочее с замечаниями"
-    verdict_sub="$warn_count предупреждений · поедет, но не идеально"
+    verdict_st=warn; verdict_text="рабочее с замечаниями"; verdict_sub="$warn_count предупреждений · поедет, но не идеально"
 elif [ "$bad_count" -le 1 ]; then
-    verdict_icon="⚠"; verdict_color=$Y
-    verdict_text="проблемы есть"
-    verdict_sub="$bad_count критичных + $warn_count предупреждений"
+    verdict_st=warn; verdict_text="проблемы есть";         verdict_sub="$bad_count критичных · $warn_count предупреждений"
 else
-    verdict_icon="✗"; verdict_color=$R
-    verdict_text="непригодна для видео"
-    verdict_sub="$bad_count критичных + $warn_count предупреждений"
+    verdict_st=bad;  verdict_text="непригодна для видео";  verdict_sub="$bad_count критичных · $warn_count предупреждений"
 fi
-echo -e "  ${verdict_color}${BOLD}${verdict_icon}  ${verdict_text}${NC}"
-echo -e "     ${DIM}${verdict_sub}${NC}"
+vcol=$(sem_color "$verdict_st"); vico=$(sem_icon "$verdict_st")
+box_top "ВЕРДИКТ"
+box_row "$(score_bar "$score")  ${BOLD}${score}${NC}${DIM}/100${NC}"
+box_row "${vcol}${BOLD}${vico}  ${verdict_text}${NC}"
+box_row "${DIM}${verdict_sub}${NC}"
+box_bottom
 echo
 
 # Если главная причина — пиринг ASN, отдельная подсветка
@@ -1815,13 +1771,13 @@ if grep -q -E '^3\|(loss|route)\|' "$FINDINGS_FILE"; then
     echo
 fi
 
-# Findings, сгруппированные по severity
+# Findings по severity — список под беджем (текст длинный, в рамку не лезет)
 if [ -s "$FINDINGS_FILE" ]; then
     print_findings_group() {
-        local sev=$1 title=$2 color=$3 icon=$4
-        local count
+        local sev=$1 title=$2 st=$3 count color icon
         count=$(awk -F'|' -v s="$sev" '$1 == s' "$FINDINGS_FILE" | wc -l)
         [ "$count" -eq 0 ] && return
+        color=$(sem_color "$st"); icon=$(sem_icon "$st")
         echo -e "  ${color}${BOLD}▌${NC} ${BOLD}$title${NC} ${DIM}($count)${NC}"
         awk -F'|' -v s="$sev" '$1 == s {print $2 "|" $3}' "$FINDINGS_FILE" | while IFS='|' read -r tag msg; do
             local pad_tag
@@ -1830,16 +1786,16 @@ if [ -s "$FINDINGS_FILE" ]; then
         done
         echo
     }
-    print_findings_group 3 "Критичные"     "$R" "✗"
-    print_findings_group 2 "Предупреждения" "$Y" "⚠"
-    print_findings_group 1 "Информация"    "$B" "·"
+    print_findings_group 3 "Критичные"      bad
+    print_findings_group 2 "Предупреждения" warn
+    print_findings_group 1 "Информация"     info
 fi
 
 # ─── рекомендации: какие модули запустить (сами фиксы — в модулях) ───
 if [ -s "$FINDINGS_FILE" ]; then
     _sd=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
     echo
-    echo -e "${DIM}  ──────────────────────────────  РЕКОМЕНДАЦИИ  ──────────────────────────────${NC}"
+    ui_divider "РЕКОМЕНДАЦИИ"
     echo
     if grep -qE '^[0-9]+\|(tcp|conntrack|bufferbloat|pmtu|cpu|nic)\|' "$FINDINGS_FILE"; then
         echo -e "  ${BOLD}Оптимизация${NC}   ${C}sudo bash $_sd/optimize.sh${NC} ${DIM}— sysctl/BBR/FD-лимиты/RPS/NIC/MSS${NC}"
@@ -1891,7 +1847,7 @@ SUMMARY_TXT="/tmp/node-diagnostic-summary-$(date +%Y%m%d-%H%M%S).txt"
 } > "$SUMMARY_TXT"
 
 echo
-echo -e "${DIM}  ─────────────────────────────────  ИТОГО  ─────────────────────────────────${NC}"
+ui_divider "ИТОГО"
 echo
 
 # Артефакты — компактным списком с иконками
