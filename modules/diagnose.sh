@@ -1523,6 +1523,65 @@ check_xray() {
 }
 
 
+# 24. Открытые порты — что торчит в интернет (частая дыра на нодах)
+check_listen() {
+    have ss || { RES_STATUS=skip; RES_SUMMARY="нет ss (iproute2)"; return; }
+    local lst
+    lst=$(ss -tulnp 2>/dev/null | tail -n +2)
+    echo "$lst"
+    [ -z "$lst" ] && { RES_STATUS=skip; RES_SUMMARY="ss ничего не вернул"; return; }
+
+    # свой SSH-порт — «легален» наружу (protect потом ограничит по IP)
+    local sshp
+    sshp=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    [ -z "$sshp" ] && sshp=$(awk '/^[Pp]ort[ \t]+[0-9]+/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    sshp=${sshp:-22}
+
+    # публичные листенеры: 0.0.0.0:p / [::]:p / *:p → «порт/proto/процесс»
+    local pub
+    pub=$(echo "$lst" | awk '
+        $5 ~ /^(0\.0\.0\.0|\[::\]|\*):[0-9]+$/ {
+            port=$5; sub(/.*:/,"",port)
+            proc="?"
+            if (match($0, /users:\(\("[^"]+"/)) { proc=substr($0,RSTART+9,RLENGTH-9-1) }
+            print port "/" $1 "/" proc
+        }' | sort -u -t/ -k1,1n)
+
+    if [ -z "$pub" ]; then
+        RES_STATUS=ok
+        RES_SUMMARY="наружу ничего лишнего"
+        summary_kv "Открытые порты" "публичных нет"
+        return
+    fi
+
+    local danger="" other="" n_ok=0 entry port proc
+    while IFS= read -r entry; do
+        port=${entry%%/*}
+        proc=${entry##*/}
+        case "$port" in
+            443|80|"$sshp") n_ok=$((n_ok+1)) ;;
+            2375|2376) danger="$danger ${port}(docker-api!)" ;;
+            5432|3306|6379|27017|9200|11211|2379)
+                       danger="$danger ${port}(${proc})" ;;
+            *)         other="$other ${port}(${proc})" ;;
+        esac
+    done <<< "$pub"
+
+    summary_kv "Открытые порты" "$(echo "$pub" | wc -l) публичных ($n_ok штатных)"
+
+    RES_STATUS=ok
+    RES_SUMMARY="$(echo "$pub" | wc -l) наружу · штатных $n_ok"
+    if [ -n "$danger" ]; then
+        RES_STATUS=bad
+        RES_SUMMARY="ОПАСНО:$danger"
+        finding 3 listen "В интернет торчит:$danger — docker-API/БД наружу = взлом ноды вопрос времени. Закрой на 127.0.0.1 или firewall'ом (protect)"
+    fi
+    if [ -n "$other" ]; then
+        [ "$RES_STATUS" = "ok" ] && RES_STATUS=warn
+        finding 2 listen "Нестандартные публичные порты:$other — если это не нужно наружу, привяжи к 127.0.0.1 (protect закроет остальное)"
+    fi
+}
+
 # ════════════════════════════════════════════════════════════════════
 # ГЛАВНАЯ ЧАСТЬ
 # ════════════════════════════════════════════════════════════════════
@@ -1571,6 +1630,7 @@ CHECKS=(
     "TCP retransmits:check_tcp_stats"
     "IPv6:check_ipv6"
     "Xray:check_xray"
+    "Открытые порты:check_listen"
 )
 
 # Долгие тесты — пропускаем в --quick режиме (~1 мин вместо ~5)
@@ -1640,7 +1700,7 @@ classify_kv() {
         Хост|IP|"Гео по базам"|"Гео по latency"|ASN|Ядро|CPU|RAM|NIC|Туннели|Xray)  echo sys ;;
         "TCP CC"|"TCP tuning"|Conntrack|DNS|PMTU|"Loss до Google"|"Маршрут"|QUIC/HTTP3|IPv6) echo net ;;
         "Speed (1-flow)"|"Speed (4-flow)"|"CDN speed"|Bufferbloat|"Variance (5x)"|"TCP retrans") echo perf ;;
-        "Сервисы"|"Cloudflare colo"|"Reverse DNS") echo svc ;;
+        "Сервисы"|"Cloudflare colo"|"Reverse DNS"|"Открытые порты") echo svc ;;
         *) echo other ;;
     esac
 }

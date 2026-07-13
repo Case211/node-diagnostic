@@ -21,7 +21,7 @@
 
 | Команда | Что делает | Применяет? |
 |---|---|---|
-| `diagnose` | 23 чека: система, сеть, скорость, сервисы, репутация IP, Xray/Remnanode | — (только читает) |
+| `diagnose` | 24 чека: система, сеть, скорость, сервисы, репутация IP, Xray/Remnanode | — (только читает) |
 | `optimize` | sysctl-тюнинг, BBR+cake, FD-лимиты, RPS/RFS/XPS, NIC offloads, MSS clamp | да (namespaced drop-in) |
 | `protect`  | firewall под Remnawave, fail2ban, SSH-хардненинг, DDoS-хардненинг | **нет — только генерирует файлы** |
 | `bbr3`     | ядро XanMod для TCP **BBRv3** (mainline даёт только v1) | да, но **без автоперезагрузки** |
@@ -33,7 +33,7 @@
 node-diagnostic.sh          точка входа: меню + диспетчер команд
 lib/common.sh               палитра, детекторы (virt/psABI/ssh), backup, namespaced drop-in, dry-run
 modules/
-  diagnose.sh               23 чека, дашборд, вердикт, рекомендации
+  diagnose.sh               24 чека, дашборд, вердикт, рекомендации
   optimize.sh               сетевой/системный тюнинг
   protect.sh                защита ноды (генерация артефактов)
   bbr3.sh                   установка XanMod (BBRv3)
@@ -72,13 +72,14 @@ sudo bash node-diagnostic.sh optimize --dry-run    # показать, что п
 sudo bash node-diagnostic.sh protect --panel-ip 1.2.3.4 --node-port 2222
 sudo bash node-diagnostic.sh bbr3 --install        # XanMod (нужен reboot); --level 2 если CPU маскирован
 sudo bash node-diagnostic.sh rollback              # откат оптимизаций
+sudo bash node-diagnostic.sh status                # что наложено на систему, ядро, cc/qdisc
 ```
 
 Типовой поток: `diagnose` → он сохраняет находки → `optimize --from-findings` применяет только релевантное. Для флота: `diagnose --json` на каждой ноде, сводишь в одну картину.
 
 Каждый модуль запускается и самостоятельно: `sudo bash modules/optimize.sh --sysctl`.
 
-## Что проверяет `diagnose` (23 чека)
+## Что проверяет `diagnose` (24 чека)
 
 **Система** — CPU/память/load/softirq, NIC drops, ring buffers, ethtool offloads.
 **Сеть** — TCP congestion + qdisc, буферы, conntrack, DNS, PMTU (бинпоиск с защитой от false-negative на лоссе), туннели (WireGuard/NetBird/Tailscale/OpenVPN/IPsec), loss/latency до Google и DNS, MTR с худшим хопом, UDP/QUIC/HTTP-3, IPv6.
@@ -86,6 +87,7 @@ sudo bash node-diagnostic.sh rollback              # откат оптимиза
 **Сервисы** — reachability + TTFB для 19 популярных (YouTube/Netflix/Twitch/TikTok/Telegram/Discord/ChatGPT/Claude/Gemini/Spotify/…); различает 200 / блок (403/429) / unreachable.
 **Репутация IP** — Cloudflare colo, гео-кросс-чек по 3 базам, реальная локация по latency до IX, Google CAPTCHA-проба, reverse DNS, «датацентр vs резидентский».
 **Xray/Remnanode** — версия, ресурсы контейнера, ошибки в логах, рестарты.
+**Открытые порты** — публичные листенеры (`ss`): docker-API (2375/2376), голые БД (postgres/mysql/redis/mongo/…) и нестандартные порты на `0.0.0.0`/`[::]` — частая дыра, через которую ломают ноду.
 
 ## `optimize` — что накладывает
 
