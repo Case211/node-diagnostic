@@ -42,7 +42,7 @@ usage() {
 node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Remnawave / VPN / Linux).
 
 Команды:
-  diagnose [-q|-v|--no-net]      Диагностика ноды (23 чека, дашборд, вердикт)
+  diagnose [-q|-v|--no-net]      Диагностика ноды (24 чека, дашборд, вердикт)
   optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--dry-run]
                                  Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS clamp
                                  --from-findings — только фиксы по находкам последней диагностики
@@ -51,6 +51,7 @@ node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Re
   bbr3     [--status|--install|--dry-run|--yes]
                                  BBRv3 через XanMod-ядро (гейт контейнеров, без автоперезагрузки)
   rollback [--yes|--dry-run]     Откат наложенных оптимизаций (namespaced-артефакты)
+  status                         Что наложено на систему, ядро, cc/qdisc
   menu                           Интерактивное меню (по умолчанию в TTY)
   help | --version
 
@@ -62,14 +63,15 @@ menu() {
     while true; do
         banner
         echo
-        echo -e "    ${C}${BOLD}[1]${NC} Диагностика        ${DIM}23 чека, дашборд, вердикт${NC}"
+        echo -e "    ${C}${BOLD}[1]${NC} Диагностика        ${DIM}24 чека, дашборд, вердикт${NC}"
         echo -e "    ${C}${BOLD}[2]${NC} Оптимизация        ${DIM}sysctl/BBR/FD/RPS/NIC${NC}"
         echo -e "    ${C}${BOLD}[3]${NC} Защита ноды        ${DIM}firewall/fail2ban/SSH (Remnawave, генерация)${NC}"
         echo -e "    ${C}${BOLD}[4]${NC} BBRv3-ядро         ${DIM}XanMod, нужен reboot${NC}"
         echo -e "    ${C}${BOLD}[5]${NC} Откат              ${DIM}снять наложенные оптимизации${NC}"
+        echo -e "    ${C}${BOLD}[6]${NC} Статус             ${DIM}что применено, ядро, cc/qdisc${NC}"
         echo -e "    ${C}${BOLD}[0]${NC} Выход"
         echo
-        printf "  ${BOLD}Выбор${NC} ${DIM}[0-5]${NC}: "
+        printf "  ${BOLD}Выбор${NC} ${DIM}[0-6]${NC}: "
         local c; read -r c
         echo
         case "$c" in
@@ -78,12 +80,46 @@ menu() {
             3) menu_protect ;;
             4) run bbr3 ;;
             5) run rollback ;;
+            6) show_status ;;
             0|q|"") echo -e "  ${DIM}выход${NC}"; return 0 ;;
             *) echo -e "  ${Y}нет такого пункта${NC}" ;;
         esac
         echo
         printf "  ${DIM}Enter — вернуться в меню…${NC}"; read -r _
     done
+}
+
+# Что тулкит наложил на систему + ключевое состояние сети (read-only)
+show_status() {
+    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}Состояние ноды${NC}"
+    echo -e "    ${DIM}версия тулкита:${NC} $ND_VERSION"
+    echo -e "    ${DIM}ядро:${NC}          $(uname -r)"
+    local cc qdisc
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')
+    echo -e "    ${DIM}congestion:${NC}    $cc + $qdisc"
+    echo
+
+    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}Наложенные артефакты${NC}"
+    local found=0 f
+    for f in /etc/sysctl.d/${ND_DROPIN_PREFIX}-*.conf \
+             /etc/security/limits.d/99-node-diagnostic.conf \
+             /etc/modules-load.d/${ND_DROPIN_PREFIX}.conf; do
+        [ -e "$f" ] && { echo -e "    ${G}·${NC} $f"; found=1; }
+    done
+    for svc in node-diagnostic-rps node-diagnostic-nic; do
+        [ -e "/etc/systemd/system/$svc.service" ] && { echo -e "    ${G}·${NC} $svc.service"; found=1; }
+    done
+    if have iptables && iptables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+        echo -e "    ${G}·${NC} iptables MSS clamp (OUTPUT)"; found=1
+    fi
+    [ "$found" = "0" ] && echo -e "    ${DIM}ничего не наложено (optimize не запускался)${NC}"
+    echo
+
+    if [ -f "$FIX_LOG" ]; then
+        echo -e "  ${C}${BOLD}▌${NC} ${BOLD}Журнал применённого${NC} ${DIM}($FIX_LOG, последние 5)${NC}"
+        tail -5 "$FIX_LOG" 2>/dev/null | sed 's/^/    /'
+    fi
 }
 
 menu_optimize() {
@@ -146,6 +182,7 @@ case "$cmd" in
     protect|firewall|fw)   run protect "$@" ;;
     bbr3|kernel)           run bbr3 "$@" ;;
     rollback|revert)       run rollback "$@" ;;
+    status|st)             show_status ;;
     menu)                  menu ;;
     help|-h|--help)        usage ;;
     --version|-V)          echo "node-diagnostic $ND_VERSION" ;;
