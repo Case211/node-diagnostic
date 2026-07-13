@@ -14,28 +14,18 @@
 set -u
 export LANG=C.UTF-8   # без export дочерние wc/awk живут в локали юзера — паддинг кириллицы едет
 
-# Версия — единый источник lib/common.sh (диспетчер передаёт через env; standalone —
-# вытягиваем сами; pipe-запуск без репозитория — unknown). Дубля числа тут больше нет.
-SCRIPT_VERSION="${ND_VERSION:-}"
-if [ -z "$SCRIPT_VERSION" ]; then
-    SCRIPT_VERSION=$(sed -n 's/^ND_VERSION="\(.*\)"/\1/p' \
-        "$(dirname "${BASH_SOURCE[0]:-$0}")/../lib/common.sh" 2>/dev/null)
-    SCRIPT_VERSION="${SCRIPT_VERSION:-unknown}"
+# Палитра, семантические токены и box-примитивы — из lib/common.sh (единый визуальный язык).
+# Диспетчер уже подключил его (ND_COMMON_LOADED); при прямом запуске — подключаем сами.
+if [ -z "${ND_COMMON_LOADED:-}" ]; then
+    # shellcheck source=../lib/common.sh
+    source "$(dirname "${BASH_SOURCE[0]:-$0}")/../lib/common.sh" 2>/dev/null \
+        || { echo "не найден lib/common.sh — нужен весь репозиторий (см. install.sh)" >&2; exit 1; }
 fi
 
-# ────────────────────────────────────────────────────────────────────
-# Палитра / форматирование
-# ────────────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-    IS_TTY=1
-    R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'
-    B=$'\033[0;34m'; C=$'\033[0;36m'; M=$'\033[0;35m'
-    BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
-    CLR_LINE=$'\033[K'
-else
-    IS_TTY=0
-    R=""; G=""; Y=""; B=""; C=""; M=""; BOLD=""; DIM=""; NC=""; CLR_LINE=""
-fi
+# IS_TTY нужен для гейта спиннера (common даёт цвета, но не этот флаг)
+if [ -t 1 ]; then IS_TTY=1; else IS_TTY=0; fi
+
+SCRIPT_VERSION="${ND_VERSION:-unknown}"
 
 VERBOSE=0
 APPLY_MODE="prompt"   # prompt | all | none
@@ -235,6 +225,7 @@ run_check() {
 # ────────────────────────────────────────────────────────────────────
 ensure_deps() {
     declare -A PKG_MAP=(
+        [ip]="iproute2:iproute:iproute2"
         [mpstat]="sysstat:sysstat:sysstat"
         [mtr]="mtr-tiny:mtr:mtr"
         [traceroute]="traceroute:traceroute:traceroute"
@@ -246,7 +237,9 @@ ensure_deps() {
         [jq]="jq:jq:jq"
     )
     local PKG_INSTALL="" IDX=0
-    if   have apt-get; then PKG_INSTALL="apt-get install -y -qq"; IDX=0
+    # apt: лок-таймаут — на Ubuntu unattended-upgrades часто держит dpkg-лок,
+    # без таймаута установка молча отваливается (или ждёт вечно на старых apt)
+    if   have apt-get; then PKG_INSTALL="apt-get -o DPkg::Lock::Timeout=60 install -y -qq"; IDX=0
     elif have dnf;     then PKG_INSTALL="dnf install -y -q";      IDX=1
     elif have yum;     then PKG_INSTALL="yum install -y -q";      IDX=1
     elif have apk;     then PKG_INSTALL="apk add --quiet";        IDX=2
@@ -262,16 +255,25 @@ ensure_deps() {
         fi
     done
     [ ${#NEED[@]} -eq 0 ] && return
+    echo "ensure_deps: ставлю ${!NEED[*]}"
     # индекс пакетов обновляем только когда реально есть что ставить —
     # иначе каждый прогон диагностики начинался с многосекундного apt-get update.
     # </dev/null обязателен: с унаследованным TTY debconf считает себя интерактивным
     # и СЪЕДАЕТ клавиатурный ввод юзера (меню после диагностики зависает на read)
-    if   have apt-get; then apt-get update -qq >/dev/null 2>&1 </dev/null || true
-    elif have apk;     then apk update -q      >/dev/null 2>&1 </dev/null || true
+    if   have apt-get; then apt-get -o DPkg::Lock::Timeout=60 update -qq >/dev/null 2>&1 </dev/null || true
+    elif have apk;     then apk update -q >/dev/null 2>&1 </dev/null || true
     fi
     # shellcheck disable=SC2086
     DEBIAN_FRONTEND=noninteractive $PKG_INSTALL ${!NEED[*]} >/dev/null 2>&1 </dev/null || true
+
+    # честный итог: что так и не появилось (чеки деградируют — юзер должен это видеть)
+    DEPS_MISSING=""
+    for cmd in "${!PKG_MAP[@]}"; do
+        have "$cmd" || DEPS_MISSING="$DEPS_MISSING $cmd"
+    done
+    [ -n "$DEPS_MISSING" ] && echo "ensure_deps: не установились:$DEPS_MISSING"
 }
+DEPS_MISSING=""
 
 # ════════════════════════════════════════════════════════════════════
 # ПРОВЕРКИ — каждая выставляет RES_STATUS и RES_SUMMARY
@@ -424,9 +426,16 @@ check_cpu() {
     if have mpstat; then
         local mp
         mp=$(mpstat -P ALL 1 1 2>/dev/null)
-        idle=$(echo "$mp"   | awk '/Average:.*all/ {print $NF}')
-        iow=$(echo "$mp"    | awk '/Average:.*all/ {print $6}')
-        softirq=$(echo "$mp"| awk '/Average:.*all/ {print $9}')
+        # колонки ищем по ИМЕНИ из заголовка: фиксированный $9 попадал в %steal
+        # (softirq-детект для RPS годами читал не ту колонку), а раскладка
+        # различается между версиями sysstat (%gnice) и busybox
+        idle=$(echo "$mp" | awk '/^Average:/ && $2=="all" {print $NF}')
+        iow=$(echo "$mp" | awk '
+            /%iowait/ && !c {for(i=1;i<=NF;i++) if($i=="%iowait") c=i}
+            /^Average:/ && $2=="all" {print $(c?c:6); exit}')
+        softirq=$(echo "$mp" | awk '
+            /%soft/ && !c {for(i=1;i<=NF;i++) if($i=="%soft") c=i}
+            /^Average:/ && $2=="all" {print $(c?c:8); exit}')
         echo "$mp"
     else
         idle="?"; iow="?"; softirq="?"
@@ -596,10 +605,13 @@ check_tcp_cc() {
     echo "cc=$cc  qdisc=$qdisc"
     echo "available=$avail"
 
-    summary_kv "TCP CC" "$cc + $qdisc"
+    # без qdisc не рисуем висячий «cc + » (в контейнере/на part-ядрах ключа нет)
+    local cc_disp="${cc:-?}"
+    [ -n "$qdisc" ] && cc_disp="$cc + $qdisc"
+    summary_kv "TCP CC" "$cc_disp"
 
     RES_STATUS=ok
-    RES_SUMMARY="$cc + $qdisc"
+    RES_SUMMARY="$cc_disp"
     if [ "$cc" != "bbr" ]; then
         if echo "$avail" | grep -q bbr; then
             RES_STATUS=warn
@@ -1504,6 +1516,65 @@ check_xray() {
 }
 
 
+# 24. Открытые порты — что торчит в интернет (частая дыра на нодах)
+check_listen() {
+    have ss || { RES_STATUS=skip; RES_SUMMARY="нет ss (iproute2)"; return; }
+    local lst
+    lst=$(ss -tulnp 2>/dev/null | tail -n +2)
+    echo "$lst"
+    [ -z "$lst" ] && { RES_STATUS=skip; RES_SUMMARY="ss ничего не вернул"; return; }
+
+    # свой SSH-порт — «легален» наружу (protect потом ограничит по IP)
+    local sshp
+    sshp=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    [ -z "$sshp" ] && sshp=$(awk '/^[Pp]ort[ \t]+[0-9]+/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    sshp=${sshp:-22}
+
+    # публичные листенеры: 0.0.0.0:p / [::]:p / *:p → «порт/proto/процесс»
+    local pub
+    pub=$(echo "$lst" | awk '
+        $5 ~ /^(0\.0\.0\.0|\[::\]|\*):[0-9]+$/ {
+            port=$5; sub(/.*:/,"",port)
+            proc="?"
+            if (match($0, /users:\(\("[^"]+"/)) { proc=substr($0,RSTART+9,RLENGTH-9-1) }
+            print port "/" $1 "/" proc
+        }' | sort -u -t/ -k1,1n)
+
+    if [ -z "$pub" ]; then
+        RES_STATUS=ok
+        RES_SUMMARY="наружу ничего лишнего"
+        summary_kv "Открытые порты" "публичных нет"
+        return
+    fi
+
+    local danger="" other="" n_ok=0 entry port proc
+    while IFS= read -r entry; do
+        port=${entry%%/*}
+        proc=${entry##*/}
+        case "$port" in
+            443|80|"$sshp") n_ok=$((n_ok+1)) ;;
+            2375|2376) danger="$danger ${port}(docker-api!)" ;;
+            5432|3306|6379|27017|9200|11211|2379)
+                       danger="$danger ${port}(${proc})" ;;
+            *)         other="$other ${port}(${proc})" ;;
+        esac
+    done <<< "$pub"
+
+    summary_kv "Открытые порты" "$(echo "$pub" | wc -l) публичных ($n_ok штатных)"
+
+    RES_STATUS=ok
+    RES_SUMMARY="$(echo "$pub" | wc -l) наружу · штатных $n_ok"
+    if [ -n "$danger" ]; then
+        RES_STATUS=bad
+        RES_SUMMARY="ОПАСНО:$danger"
+        finding 3 listen "В интернет торчит:$danger — docker-API/БД наружу = взлом ноды вопрос времени. Закрой на 127.0.0.1 или firewall'ом (protect)"
+    fi
+    if [ -n "$other" ]; then
+        [ "$RES_STATUS" = "ok" ] && RES_STATUS=warn
+        finding 2 listen "Нестандартные публичные порты:$other — если это не нужно наружу, привяжи к 127.0.0.1 (protect закроет остальное)"
+    fi
+}
+
 # ════════════════════════════════════════════════════════════════════
 # ГЛАВНАЯ ЧАСТЬ
 # ════════════════════════════════════════════════════════════════════
@@ -1511,13 +1582,16 @@ check_xray() {
 # Header
 echo
 echo -e "  ${C}${BOLD}NODE DIAGNOSTIC${NC}  ${DIM}v${SCRIPT_VERSION}${NC}"
-echo -e "  ${DIM}─────────────────────────────────────────────────────${NC}"
+ui_rule
 echo -e "  ${DIM}$(date -u +'%Y-%m-%d %H:%M UTC') · $(hostname)${NC}"
 echo
 
 echo -ne "  ${DIM}Ставлю недостающие пакеты…${NC}"
 ensure_deps >>"$LOG" 2>&1
 echo -e "\r${CLR_LINE}  ${DIM}Лог: $LOG${NC}"
+if [ -n "$DEPS_MISSING" ]; then
+    echo -e "  ${Y}⚠${NC} ${DIM}не удалось поставить:${NC}${DEPS_MISSING} ${DIM}— часть проверок будет пропущена/урезана${NC}"
+fi
 echo
 
 # Глобальные значения для фиксов (нужны вне subshell'ов)
@@ -1549,6 +1623,7 @@ CHECKS=(
     "TCP retransmits:check_tcp_stats"
     "IPv6:check_ipv6"
     "Xray:check_xray"
+    "Открытые порты:check_listen"
 )
 
 # Долгие тесты — пропускаем в --quick режиме (~1 мин вместо ~5)
@@ -1618,7 +1693,7 @@ classify_kv() {
         Хост|IP|"Гео по базам"|"Гео по latency"|ASN|Ядро|CPU|RAM|NIC|Туннели|Xray)  echo sys ;;
         "TCP CC"|"TCP tuning"|Conntrack|DNS|PMTU|"Loss до Google"|"Маршрут"|QUIC/HTTP3|IPv6) echo net ;;
         "Speed (1-flow)"|"Speed (4-flow)"|"CDN speed"|Bufferbloat|"Variance (5x)"|"TCP retrans") echo perf ;;
-        "Сервисы"|"Cloudflare colo"|"Reverse DNS") echo svc ;;
+        "Сервисы"|"Cloudflare colo"|"Reverse DNS"|"Открытые порты") echo svc ;;
         *) echo other ;;
     esac
 }
@@ -1635,94 +1710,57 @@ done < "$FINDINGS_FILE"
 score=$(( 100 - penalty * 5 ))
 [ "$score" -lt 0 ] && score=0
 
-# Хелперы для рендера
-print_section_header() {
-    echo -e "  ${C}${BOLD}▌${NC} ${BOLD}$1${NC}"
-}
-
-print_kv_aligned() {
-    local k="$1" v="$2"
-    local clen pad
-    clen=$(printf '%s' "$k" | wc -m)
-    pad=$(( 18 - clen ))
-    [ "$pad" -lt 0 ] && pad=0
-    printf "    ${DIM}%s%*s${NC}  %s\n" "$k" "$pad" "" "$v"
-}
-
-# Score-gauge: 20-сегментный бар с цветом по диапазону
-print_score_gauge() {
-    local s=$1
-    local filled=$(( s * 20 / 100 ))
-    [ "$filled" -gt 20 ] && filled=20
-    local empty=$(( 20 - filled ))
-    local color
-    if   [ "$s" -ge 80 ]; then color=$G
-    elif [ "$s" -ge 50 ]; then color=$Y
-    else                       color=$R
-    fi
-    local bar=""
-    local i
+# Score-бар: 20 сегментов, цвет по диапазону. Возвращает готовую цветную строку.
+score_bar() {
+    local s=$1 filled empty color bar="" i
+    filled=$(( s * 20 / 100 )); [ "$filled" -gt 20 ] && filled=20
+    empty=$(( 20 - filled ))
+    if   [ "$s" -ge 80 ]; then color=$C_OK
+    elif [ "$s" -ge 50 ]; then color=$C_WARN
+    else                       color=$C_BAD; fi
     for ((i=0; i<filled; i++)); do bar="${bar}█"; done
-    for ((i=0; i<empty;  i++)); do bar="${bar}░"; done
-    printf "  %sScore%s  ${color}%s${NC}  ${BOLD}%3d${NC}${DIM}/100${NC}" \
-        "$BOLD" "$NC" "$bar" "$s"
+    printf '%s%s%s' "$color" "$bar" "$DIM"
+    bar=""; for ((i=0; i<empty; i++)); do bar="${bar}░"; done
+    printf '%s%s' "$bar" "$NC"
 }
 
-# Заголовок раздела
-echo
-echo -e "${DIM}  ─────────────────────────────────  СВОДКА  ─────────────────────────────────${NC}"
-echo
-
-# Группируем сводку по категориям
-section_started=""
-print_category() {
-    local cat=$1 title=$2
-    local has_keys=0
+# Категория сводки → карточка (box-примитивы из common.sh)
+render_card() {
+    local cat=$1 title=$2 rows=() k v
     while IFS='|' read -r k v; do
-        if [ "$(classify_kv "$k")" = "$cat" ]; then
-            if [ "$has_keys" = "0" ]; then
-                [ -n "$section_started" ] && echo
-                print_section_header "$title"
-                has_keys=1
-                section_started=1
-            fi
-            print_kv_aligned "$k" "$v"
-        fi
+        [ "$(classify_kv "$k")" = "$cat" ] && rows+=("$k|$v")
     done < "$SUMMARY_FILE"
+    [ ${#rows[@]} -eq 0 ] && return
+    box_top "$title"
+    local pair
+    for pair in "${rows[@]}"; do box_kv "${pair%%|*}" "${pair#*|}"; done
+    box_bottom
+    echo
 }
-print_category sys  "Система"
-print_category net  "Сеть"
-print_category perf "Производительность"
-print_category svc  "Сервисы и репутация"
 
-# Score gauge + verdict
 echo
-echo
-print_score_gauge "$score"
-echo
-echo
+render_card sys  "СИСТЕМА"
+render_card net  "СЕТЬ"
+render_card perf "ПРОИЗВОДИТЕЛЬНОСТЬ"
+render_card svc  "СЕРВИСЫ И РЕПУТАЦИЯ"
 
-# Вердикт
-verdict_icon=""; verdict_color=""; verdict_text=""; verdict_sub=""
+# ── Вердикт + score в одной карточке ──
+verdict_st=""; verdict_text=""; verdict_sub=""
 if [ "$bad_count" = "0" ] && [ "$warn_count" = "0" ]; then
-    verdict_icon="✓"; verdict_color=$G
-    verdict_text="нода в порядке"
-    verdict_sub="видео и сервисы должны работать без проблем"
+    verdict_st=ok;   verdict_text="нода в порядке";        verdict_sub="видео и сервисы должны работать без проблем"
 elif [ "$bad_count" = "0" ]; then
-    verdict_icon="⚠"; verdict_color=$Y
-    verdict_text="рабочее с замечаниями"
-    verdict_sub="$warn_count предупреждений · поедет, но не идеально"
-elif [ "$bad_count" -le 1 ]; then
-    verdict_icon="⚠"; verdict_color=$Y
-    verdict_text="проблемы есть"
-    verdict_sub="$bad_count критичных + $warn_count предупреждений"
+    verdict_st=warn; verdict_text="рабочее с замечаниями"
+    verdict_sub="$warn_count $(plural_ru "$warn_count" предупреждение предупреждения предупреждений) · поедет, но не идеально"
 else
-    verdict_icon="✗"; verdict_color=$R
-    verdict_text="непригодна для видео"
-    verdict_sub="$bad_count критичных + $warn_count предупреждений"
+    [ "$bad_count" -le 1 ] && { verdict_st=warn; verdict_text="проблемы есть"; } || { verdict_st=bad; verdict_text="непригодна для видео"; }
+    verdict_sub="$bad_count $(plural_ru "$bad_count" критичная критичные критичных) · $warn_count $(plural_ru "$warn_count" предупреждение предупреждения предупреждений)"
 fi
-echo -e "  ${verdict_color}${BOLD}${verdict_icon}  ${verdict_text}${NC}"
-echo -e "     ${DIM}${verdict_sub}${NC}"
+vcol=$(sem_color "$verdict_st"); vico=$(sem_icon "$verdict_st")
+box_top "ВЕРДИКТ"
+box_row "$(score_bar "$score")  ${BOLD}${score}${NC}${DIM}/100${NC}"
+box_row "${vcol}${BOLD}${vico}  ${verdict_text}${NC}"
+box_row "${DIM}${verdict_sub}${NC}"
+box_bottom
 echo
 
 # Если главная причина — пиринг ASN, отдельная подсветка
@@ -1733,13 +1771,13 @@ if grep -q -E '^3\|(loss|route)\|' "$FINDINGS_FILE"; then
     echo
 fi
 
-# Findings, сгруппированные по severity
+# Findings по severity — список под беджем (текст длинный, в рамку не лезет)
 if [ -s "$FINDINGS_FILE" ]; then
     print_findings_group() {
-        local sev=$1 title=$2 color=$3 icon=$4
-        local count
+        local sev=$1 title=$2 st=$3 count color icon
         count=$(awk -F'|' -v s="$sev" '$1 == s' "$FINDINGS_FILE" | wc -l)
         [ "$count" -eq 0 ] && return
+        color=$(sem_color "$st"); icon=$(sem_icon "$st")
         echo -e "  ${color}${BOLD}▌${NC} ${BOLD}$title${NC} ${DIM}($count)${NC}"
         awk -F'|' -v s="$sev" '$1 == s {print $2 "|" $3}' "$FINDINGS_FILE" | while IFS='|' read -r tag msg; do
             local pad_tag
@@ -1748,16 +1786,16 @@ if [ -s "$FINDINGS_FILE" ]; then
         done
         echo
     }
-    print_findings_group 3 "Критичные"     "$R" "✗"
-    print_findings_group 2 "Предупреждения" "$Y" "⚠"
-    print_findings_group 1 "Информация"    "$B" "·"
+    print_findings_group 3 "Критичные"      bad
+    print_findings_group 2 "Предупреждения" warn
+    print_findings_group 1 "Информация"     info
 fi
 
 # ─── рекомендации: какие модули запустить (сами фиксы — в модулях) ───
 if [ -s "$FINDINGS_FILE" ]; then
     _sd=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
     echo
-    echo -e "${DIM}  ──────────────────────────────  РЕКОМЕНДАЦИИ  ──────────────────────────────${NC}"
+    ui_divider "РЕКОМЕНДАЦИИ"
     echo
     if grep -qE '^[0-9]+\|(tcp|conntrack|bufferbloat|pmtu|cpu|nic)\|' "$FINDINGS_FILE"; then
         echo -e "  ${BOLD}Оптимизация${NC}   ${C}sudo bash $_sd/optimize.sh${NC} ${DIM}— sysctl/BBR/FD-лимиты/RPS/NIC/MSS${NC}"
@@ -1809,7 +1847,7 @@ SUMMARY_TXT="/tmp/node-diagnostic-summary-$(date +%Y%m%d-%H%M%S).txt"
 } > "$SUMMARY_TXT"
 
 echo
-echo -e "${DIM}  ─────────────────────────────────  ИТОГО  ─────────────────────────────────${NC}"
+ui_divider "ИТОГО"
 echo
 
 # Артефакты — компактным списком с иконками

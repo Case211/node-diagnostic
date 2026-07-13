@@ -48,16 +48,9 @@ protect_generate() {
     local ssh_port ssh_ip out
     ssh_port=$(detect_ssh_port)
     ssh_ip=$(ssh_client_ip)
-    # шаблоны firewall написаны под IPv4 (ip saddr / set ipv4_addr) — v6-адрес
-    # в них молча ломает применение, лучше честный плейсхолдер + предупреждение
-    case "$ssh_ip" in
-        *:*) msg_warn "текущая SSH-сессия по IPv6 ($ssh_ip) — шаблон правил под IPv4: подставь свой v4 или добавь «ip6 saddr» вручную"
-             ssh_ip="" ;;
-    esac
-    case "$PANEL_IP" in
-        *:*) msg_warn "IP панели задан как IPv6 ($PANEL_IP) — set panel_ip в шаблоне типа ipv4_addr: подставь v4 или перепиши set на ipv6_addr"
-             PANEL_IP="" ;;
-    esac
+    # dual-stack: nft-шаблон сам подставит ip6 saddr / ipv6_addr по семейству адреса
+    case "$ssh_ip"   in *:*) msg_info "SSH-сессия по IPv6 ($ssh_ip) — правила будут на ip6 saddr" ;; esac
+    case "$PANEL_IP" in *:*) msg_info "IP панели IPv6 ($PANEL_IP) — set panel_ip будет типа ipv6_addr" ;; esac
     [ -z "$NODE_PORT" ] && NODE_PORT=$(detect_node_port || echo "")
     if need_root; then out="${PROTECT_OUT:-/root/node-diagnostic-protect}"; else out="${PROTECT_OUT:-$PWD/node-diagnostic-protect}"; fi
     mkdir -p "$out" || die "не создал каталог $out"
@@ -67,7 +60,7 @@ protect_generate() {
     [ -z "$ph_ssh" ]   && ph_ssh="<YOUR_SSH_IP>"
 
     echo
-    echo -e "  ${BOLD}Генерация защиты ноды (Remnawave)${NC}"
+    ui_head "Генерация защиты ноды" "Remnawave · только генерация файлов"
     echo -e "    ${DIM}SSH-порт:${NC} $ssh_port   ${DIM}твой SSH-IP:${NC} $ph_ssh"
     echo -e "    ${DIM}NODE_PORT (control-API):${NC} ${NODE_PORT:-<не найден, укажи --node-port>}"
     echo -e "    ${DIM}IP панели:${NC} $ph_panel"
@@ -94,17 +87,24 @@ protect_generate() {
 
 _gen_nft() {
     local out=$1 ssh_port=$2 ssh_ip=$3 panel=$4 node_port=$5
+
+    # семейство адреса → правильный синтаксис saddr (dual-stack: v6 больше не игнорируется)
+    local ssh_saddr="ip saddr" panel_type="ipv4_addr" panel_saddr="ip saddr"
+    case "$ssh_ip" in *:*) ssh_saddr="ip6 saddr" ;; esac
+    case "$panel"  in *:*) panel_type="ipv6_addr"; panel_saddr="ip6 saddr" ;; esac
+
     cat > "$out/firewall.nft" <<EOF
 #!/usr/sbin/nft -f
 # node-diagnostic: firewall для Remnawave-ноды. Своя таблица, ruleset не флашится (уживается с Docker).
 # Применить:  sudo nft -f $out/firewall.nft
 # Порты: 443 (VLESS/Reality + QUIC/HY2), 80 (ACME/Caddy), NODE_PORT (control-API) — только с IP панели.
+# SSH ограничен по семейству твоего адреса ($ssh_saddr), 443 лимитируется и для v4, и для v6.
 
 table inet node_protect
 delete table inet node_protect
 table inet node_protect {
     set panel_ip {
-        type ipv4_addr
+        type $panel_type
         elements = { $panel }
     }
     chain input {
@@ -121,26 +121,33 @@ table inet node_protect {
         ip6 nexthdr icmpv6  accept
 
         # SSH — только с твоего IP + анти-брут по скорости соединений
-        tcp dport $ssh_port ip saddr $ssh_ip ct state new \\
-            meter ssh_rate { ip saddr limit rate over ${SSH_RATE}/minute } drop
-        tcp dport $ssh_port ip saddr $ssh_ip accept
+        tcp dport $ssh_port $ssh_saddr $ssh_ip ct state new \\
+            meter ssh_rate { $ssh_saddr limit rate over ${SSH_RATE}/minute } drop
+        tcp dport $ssh_port $ssh_saddr $ssh_ip accept
 
         # 443 — публичный вход. Per-IP лимит одновременных соединений и SYN-rate.
         # (ct count вне meter считал бы ВСЕ соединения порта разом — душил бы ноду целиком)
-        tcp dport 443 ct state new \\
-            meter conn443 { ip saddr ct count over $CONN_LIMIT } drop
-        tcp dport 443 ct state new \\
-            meter syn443 { ip saddr limit rate over ${SYN_RATE}/second burst $((SYN_RATE*2)) packets } drop
+        # Отдельные meter'ы для v4 и v6 — key ip saddr не матчит v6-пакеты, они бы обошли лимит.
+        tcp dport 443 ip saddr 0.0.0.0/0 ct state new \\
+            meter conn443_4 { ip saddr ct count over $CONN_LIMIT } drop
+        tcp dport 443 ip6 saddr ::/0 ct state new \\
+            meter conn443_6 { ip6 saddr ct count over $CONN_LIMIT } drop
+        tcp dport 443 ip saddr 0.0.0.0/0 ct state new \\
+            meter syn443_4 { ip saddr limit rate over ${SYN_RATE}/second burst $((SYN_RATE*2)) packets } drop
+        tcp dport 443 ip6 saddr ::/0 ct state new \\
+            meter syn443_6 { ip6 saddr limit rate over ${SYN_RATE}/second burst $((SYN_RATE*2)) packets } drop
         tcp dport 443 accept
-        udp dport 443 \\
-            meter udp443 { ip saddr limit rate over ${UDP_RATE}/second } drop
+        udp dport 443 ip saddr 0.0.0.0/0 \\
+            meter udp443_4 { ip saddr limit rate over ${UDP_RATE}/second } drop
+        udp dport 443 ip6 saddr ::/0 \\
+            meter udp443_6 { ip6 saddr limit rate over ${UDP_RATE}/second } drop
         udp dport 443 accept
 
         # 80 — ACME HTTP-01 / редирект (Caddy держит сам)
         tcp dport 80 accept
 
         # NODE_PORT — канал панель->нода, ТОЛЬКО с IP панели
-        tcp dport $node_port ip saddr @panel_ip accept
+        tcp dport $node_port $panel_saddr @panel_ip accept
 
         # остальное — в лог и drop
         limit rate 5/minute log prefix "node_protect drop: " level info

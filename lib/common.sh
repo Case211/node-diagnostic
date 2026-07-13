@@ -6,7 +6,11 @@
 [ -n "${ND_COMMON_LOADED:-}" ] && return 0
 ND_COMMON_LOADED=1
 
-ND_VERSION="4.1.1"
+# UTF-8 локаль для ВСЕХ модулей: без неё ${#s} и ${s:0:n} считают байты, а не символы —
+# рамки карточек и паддинг кириллицы едут. Экспорт наследуется в под-процессы модулей.
+export LANG=C.UTF-8
+
+ND_VERSION="4.2.0"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
 
 # ────────────────────────────────────────────────────────────────────
@@ -21,18 +25,116 @@ else
     R=""; G=""; Y=""; B=""; C=""; M=""; BOLD=""; DIM=""; NC=""; CLR_LINE=""
 fi
 
+# ── Семантические токены (единый визуальный язык) ────────────────────
+# Смысл, а не цвет: ok/warn/bad/info/accent/muted + иконки под каждым статусом.
+# Кросс-модульные (diagnose/optimize/protect/node-diagnostic) — export снимает SC2034.
+C_OK=$G; C_WARN=$Y; C_BAD=$R; C_INFO=$B; C_ACCENT=$C; C_MUTED=$DIM
+# ⚠ (U+26A0) по Unicode default = emoji-presentation → 2 колонки в kitty/wezterm/iTerm2
+# и т.п. VS15 (U+FE0E) форсит text-presentation = гарантированно 1 колонка везде.
+# vlen ниже игнорирует вариационные селекторы, чтобы ширина совпала с рендером.
+I_OK="✓"; I_WARN=$'⚠︎'; I_BAD="✗"; I_INFO="·"; I_SKIP="·"
+export C_OK C_WARN C_BAD C_INFO C_ACCENT C_MUTED I_OK I_WARN I_BAD I_INFO I_SKIP
+# статус (ok/warn/bad/skip/info) → цвет и иконка одним источником
+sem_color() { case "$1" in ok) printf '%s' "$G";; warn) printf '%s' "$Y";; bad) printf '%s' "$R";; info) printf '%s' "$B";; *) printf '%s' "$DIM";; esac; }
+sem_icon()  { case "$1" in ok) printf '%s' "$I_OK";; warn) printf '%s' "$I_WARN";; bad) printf '%s' "$I_BAD";; info) printf '%s' "$I_INFO";; *) printf '%s' "$I_SKIP";; esac; }
+
+# ── UI-примитивы: карточки в рамках с корректной шириной ─────────────
+# Ширина считается по ВИДИМЫМ колонкам (ANSI срезаются, кириллица = 1) —
+# иначе рамки едут. Проверено на bash и busybox.
+ND_ESC=$'\033'
+shopt -s extglob 2>/dev/null || true
+strip_ansi() { local s=$1; printf '%s' "${s//${ND_ESC}\[*([0-9;])m/}"; }
+vlen() {
+    local s; s=$(strip_ansi "$1")
+    s=${s//$'︎'/}; s=${s//$'️'/}   # вариационные селекторы zero-width — не считать
+    printf '%s' "${#s}"
+}
+
+# Ширина карточки адаптируется под терминал: на узком SSH-клиенте фикс-58
+# переносил бы рамки. Полная карточка = ND_BOX_W+6 колонок (отступ+рамка+поля).
+_detect_cols() {
+    local c=""
+    [ -t 1 ] && c=$( { tput cols; } 2>/dev/null )
+    [ -z "$c" ] && c="${COLUMNS:-}"
+    case "$c" in ''|*[!0-9]*) c=80 ;; esac   # не-TTY/мусор → безопасные 80
+    printf '%s' "$c"
+}
+if [ -z "${ND_BOX_W:-}" ]; then
+    _cols=$(_detect_cols)
+    if [ "$_cols" -ge 66 ]; then ND_BOX_W=58            # штатный широкий терминал
+    else ND_BOX_W=$(( _cols - 8 )); [ "$ND_BOX_W" -lt 30 ] && ND_BOX_W=30; fi
+fi
+# горизонтальная линия нужной длины (режем заранее готовую по символам — UTF-8-safe)
+ND_HR=""; while [ "${#ND_HR}" -lt "$((ND_BOX_W + 4))" ]; do ND_HR="${ND_HR}─"; done
+
+# русское склонение по числу: plural_ru N "одна" "две" "пять"
+plural_ru() {
+    local n=$1 m10=$(( ${1#-} % 10 )) m100=$(( ${1#-} % 100 ))
+    if   [ "$m10" -eq 1 ] && [ "$m100" -ne 11 ]; then printf '%s' "$2"
+    elif [ "$m10" -ge 2 ] && [ "$m10" -le 4 ] && { [ "$m100" -lt 12 ] || [ "$m100" -gt 14 ]; }; then printf '%s' "$3"
+    else printf '%s' "$4"; fi
+}
+
+# обрезать видимый plain-текст (без ANSI) до N колонок с «…»
+ui_fit() {
+    local s=$1 n=$2
+    [ "${#s}" -le "$n" ] && { printf '%s' "$s"; return; }
+    printf '%s…' "${s:0:$((n-1))}"
+}
+
+# повтор ─ по СИМВОЛАМ (bash printf %.*s режет UTF-8 по байтам → мусор; подстрока — по символам)
+_hr() { printf '%s' "${ND_HR:0:$1}"; }
+# pad пробелами до N видимых колонок (учёт кириллицы/ANSI — printf %-Ns считает байты, врёт)
+_vpad() { local s=$1 n=$2; local p=$(( n - $(vlen "$s") )); [ "$p" -lt 0 ] && p=0; printf '%s%*s' "$s" "$p" ""; }
+
+box_top() {   # box_top "ЗАГОЛОВОК"
+    local t="$1"                                 # "─ TITLE ─" = 4 обрамляющих + len
+    local dash_n=$(( ND_BOX_W + 2 - 4 - ${#t} ))
+    [ "$dash_n" -lt 1 ] && dash_n=1
+    printf '  %s┌─ %s%s%s ─%s┐%s\n' "$DIM" "$C_ACCENT$BOLD" "$t" "$NC$DIM" "$(_hr "$dash_n")" "$NC"
+}
+box_row() {   # box_row "<контент, можно с ANSI>"
+    local content=$1 vl pad
+    vl=$(vlen "$content"); pad=$(( ND_BOX_W - vl )); [ "$pad" -lt 0 ] && pad=0
+    printf '  %s│%s %s%*s %s│%s\n' "$DIM" "$NC" "$content" "$pad" "" "$DIM" "$NC"
+}
+box_kv() {    # box_kv "Ключ" "значение" [ширина_ключа] — выровненная пара
+    local k=$1 v=$2 kw="${3:-11}" vw
+    vw=$(( ND_BOX_W - kw - 1 ))
+    v=$(ui_fit "$v" "$vw")
+    box_row "${DIM}$(_vpad "$k" "$kw")${NC} $v"
+}
+box_bottom() { printf '  %s└%s┘%s\n' "$DIM" "$(_hr $((ND_BOX_W + 2)))" "$NC"; }
+
+# заголовок секции для потоковых модулей (optimize/protect) — акцент-полоска без рамки
+ui_head() {
+    printf '\n  %s%s▍%s %s%s%s' "$C_ACCENT" "$BOLD" "$NC" "$BOLD" "$1" "$NC"
+    [ -n "${2:-}" ] && printf ' %s%s%s' "$DIM" "$2" "$NC"
+    printf '\n'
+}
+
+# тонкая линия во всю ширину карточки (без подписи или с подписью по центру)
+ui_rule() { printf '  %s%s%s\n' "$DIM" "$(_hr $((ND_BOX_W + 4)))" "$NC"; }
+ui_divider() {   # ui_divider "ТЕКСТ" — линия с центрированной приглушённой подписью
+    local t=" $1 " vl total left right
+    vl=$(vlen "$t"); total=$(( ND_BOX_W + 4 ))
+    left=$(( (total - vl) / 2 )); [ "$left" -lt 1 ] && left=1
+    right=$(( total - vl - left )); [ "$right" -lt 1 ] && right=1
+    printf '  %s%s%s%s%s%s%s%s\n' "$DIM" "$(_hr "$left")" "$NC" "${C_MUTED}${BOLD}$t$NC" "$DIM" "$(_hr "$right")" "$NC" ""
+}
+
 # ────────────────────────────────────────────────────────────────────
 # Базовые хелперы
 # ────────────────────────────────────────────────────────────────────
 have()      { command -v "$1" >/dev/null 2>&1; }
 need_root() { [ "$(id -u)" -eq 0 ]; }
 
-msg_ok()   { echo -e "    ${G}✓${NC} $*"; }
-msg_warn() { echo -e "    ${Y}⚠${NC} $*"; }
-msg_err()  { echo -e "    ${R}✗${NC} $*"; }
+msg_ok()   { echo -e "    ${G}${I_OK}${NC} $*"; }
+msg_warn() { echo -e "    ${Y}${I_WARN}${NC} $*"; }
+msg_err()  { echo -e "    ${R}${I_BAD}${NC} $*"; }
 msg_info() { echo -e "    ${DIM}$*${NC}"; }
 
-die() { echo -e "${R}${BOLD}✗${NC} $*" >&2; exit 1; }
+die() { echo -e "${R}${BOLD}${I_BAD}${NC} $*" >&2; exit 1; }
 
 # ────────────────────────────────────────────────────────────────────
 # Состояние (общий findings-файл между модулями)

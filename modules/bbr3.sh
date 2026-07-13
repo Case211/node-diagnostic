@@ -71,6 +71,24 @@ bbr3_add_repo() {
     [ -n "$codename" ] || die "не определил codename дистрибутива (/etc/os-release)."
     msg_info "codename: $codename"
 
+    # Пре-чек ДО каких-либо изменений системы: XanMod публикует repo per-codename и
+    # дропает старые (например jammy/focal — 404). Иначе мы бы поставили ключ+лист,
+    # apt update у юзера начал бы вечно ругаться, а BBRv3 всё равно не приехал бы.
+    local rel_url="https://deb.xanmod.org/dists/$codename/Release" rel_code=""
+    if have curl; then
+        rel_code=$(curl -fsIL -o /dev/null -w '%{http_code}' --connect-timeout 10 "$rel_url" 2>/dev/null || true)
+    else
+        wget -q --spider --timeout=10 "$rel_url" 2>/dev/null && rel_code=200 || rel_code=404
+    fi
+    if [ "$rel_code" != "200" ]; then
+        die "XanMod не публикует репозиторий для '$codename' (HTTP ${rel_code:-fail} на dists/$codename/Release).
+    Старые релизы дропаются (2026: jammy/focal уже нет; живы noble/bookworm/trixie/sid).
+    На этом дистрибутиве BBRv3-ядро XanMod недоступен — вариант: обновить ОС
+    или остаться на BBRv1 стокового ядра (modules/optimize.sh включит bbr+cake).
+    Система не тронута."
+    fi
+    msg_ok "репозиторий для '$codename' существует (пре-чек)"
+
     if [ "$DRY_RUN" = "1" ]; then
         echo -e "    ${DIM}[dry-run]${NC} wget $XANMOD_KEY_URL | gpg --dearmor -o $XANMOD_KEYRING"
         echo -e "    ${DIM}[dry-run]${NC} проверка отпечатка $XANMOD_FPR"
@@ -97,18 +115,22 @@ bbr3_add_repo() {
     msg_ok "ключ проверен ($XANMOD_FPR) и установлен"
 
     echo "deb [signed-by=$XANMOD_KEYRING] http://deb.xanmod.org $codename main" > "$XANMOD_LIST"
-    if ! apt-get update >/dev/null 2>&1; then
-        msg_warn "apt update дал ошибку для '$codename' — возможно codename не поддержан репо. Убери $XANMOD_LIST если что."
-        return 1
+    if ! apt-get update -o DPkg::Lock::Timeout=60 >/dev/null 2>&1; then
+        # прибираем за собой — не оставляем битый источник, который ломает apt юзеру
+        rm -f "$XANMOD_LIST" "$XANMOD_KEYRING"
+        apt-get update >/dev/null 2>&1 || true
+        die "apt update с репозиторием XanMod упал (сеть/зеркало?). Источник и ключ убраны, apt восстановлен."
     fi
     msg_ok "репозиторий XanMod добавлен"
 }
 
-# подбирает доступный пакет по psABI-уровню, деградируя v3→v2→v1
+# подбирает доступный пакет по psABI-уровню, деградируя ступенчато вниз (v4→v3→v2→v1).
+# Прежний список «$lvl 2 1» перепрыгивал v3: CPU уровня v4 получал v2-ядро,
+# хотя v3 в репо есть (v4 XanMod вообще не публикует — проверено на noble 2026-07).
 bbr3_pick_pkg() {
     local lvl="${BBR3_LEVEL:-$(cpu_psabi_level)}"
-    local l
-    for l in "$lvl" 2 1; do
+    local l pkg
+    for (( l=lvl; l>=1; l-- )); do
         for pkg in "linux-xanmod-lts-x64v${l}" "linux-xanmod-x64v${l}"; do
             if apt-cache show "$pkg" >/dev/null 2>&1; then
                 echo "$pkg"; return 0

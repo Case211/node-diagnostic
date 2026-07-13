@@ -49,7 +49,7 @@ opt_sysctl() {
         msg_info "sch_cake недоступен — qdisc=fq"
     fi
 
-    echo -e "  ${BOLD}sysctl tuning${NC} ${DIM}(RAM=$(( $(_mem_kb)/1024 ))M → буферы $((sock_max/1024/1024))M · conntrack $ct_max · cc=$cc · qdisc=$qdisc)${NC}"
+    ui_head "sysctl tuning" "RAM=$(( $(_mem_kb)/1024 ))M → буферы $((sock_max/1024/1024))M · conntrack $ct_max · cc=$cc · qdisc=$qdisc"
 
     write_dropin tuning <<EOF
 # Congestion control + qdisc
@@ -124,7 +124,7 @@ EOF
 
 # ── 2. FD-лимиты (xray упирается в дескрипторы; sysctl + limits + systemd + pam) ──
 opt_fd_limits() {
-    echo -e "  ${BOLD}FD-лимиты${NC} ${DIM}(file-max, nofile для сессий и systemd-сервисов)${NC}"
+    ui_head "FD-лимиты" "file-max, nofile для сессий и systemd-сервисов"
     write_dropin fd <<'EOF'
 fs.file-max = 2097152
 fs.nr_open = 2097152
@@ -172,7 +172,7 @@ opt_rps() {
     local iface="${1:-$(default_iface)}"
     [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
     local n mask; n=$(nproc); mask=$(cpu_mask "$n")
-    echo -e "  ${BOLD}RPS/RFS/XPS${NC} ${DIM}mask=$mask на $iface${NC}"
+    ui_head "RPS/RFS/XPS" "mask=$mask на $iface"
 
     if [ "$DRY_RUN" = "1" ]; then
         echo -e "    ${DIM}[dry-run]${NC} rps_cpus/xps_cpus=$mask, rps_flow_cnt=4096, rps_sock_flow_entries=32768"
@@ -223,7 +223,7 @@ opt_nic() {
     local iface="${1:-$(default_iface)}"
     [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
     have ethtool || { msg_warn "нет ethtool — пропускаю (apt install ethtool)"; return 0; }
-    echo -e "  ${BOLD}NIC tuning${NC} ${DIM}ring max + gro/gso/tso + txqueuelen на $iface${NC}"
+    ui_head "NIC tuning" "ring max + gro/gso/tso + txqueuelen на $iface"
 
     local max_rx max_tx
     max_rx=$(ethtool -g "$iface" 2>/dev/null | awk '/^RX:/{print $2; exit}')
@@ -263,7 +263,7 @@ UNIT
 # ── 5. iptables MSS clamp (большие чанки не упираются в Frag-needed) ──
 opt_mss_clamp() {
     have iptables || { msg_warn "нет iptables — пропускаю MSS clamp"; return 0; }
-    echo -e "  ${BOLD}MSS clamp${NC} ${DIM}iptables TCPMSS --clamp-mss-to-pmtu (FORWARD/OUTPUT)${NC}"
+    ui_head "MSS clamp" "iptables TCPMSS --clamp-mss-to-pmtu (FORWARD/OUTPUT)"
     # SYN,RST — маска флагов iptables (один аргумент), не разделитель массива
     # shellcheck disable=SC2054
     local rule_args=(-p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu)
@@ -277,6 +277,13 @@ opt_mss_clamp() {
     done
     [ "$DRY_RUN" = "1" ] && return 0
     backup_settings
+    # persist: netfilter-persistent; на apt-дистро при его отсутствии ставим сами
+    # (</dev/null + noninteractive — debconf в TTY съедает клавиатурный ввод юзера)
+    if ! have netfilter-persistent && have apt-get; then
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 \
+            install -y -qq iptables-persistent >/dev/null 2>&1 </dev/null || true
+        have netfilter-persistent && msg_ok "поставил iptables-persistent (для сохранения правил)"
+    fi
     if have netfilter-persistent; then
         netfilter-persistent save >/dev/null 2>&1 && msg_ok "netfilter-persistent save"
     elif [ -d /etc/iptables ] && have iptables-save; then
@@ -288,7 +295,7 @@ opt_mss_clamp() {
 }
 
 opt_swappiness() {
-    echo -e "  ${BOLD}vm.swappiness=10${NC}"
+    ui_head "vm.swappiness=10"
     write_dropin swappiness <<'EOF'
 vm.swappiness = 10
 EOF
@@ -296,12 +303,14 @@ EOF
 
 opt_all() {
     [ "$DRY_RUN" = "1" ] || need_root || die "нужен root для применения фиксов."
-    opt_sysctl;   echo
-    opt_fd_limits; echo
-    opt_rps;      echo
-    opt_nic;      echo
-    opt_mss_clamp; echo
-    opt_swappiness; echo
+    # ui_head сам даёт верхний отступ секции — отдельные echo больше не нужны
+    opt_sysctl
+    opt_fd_limits
+    opt_rps
+    opt_nic
+    opt_mss_clamp
+    opt_swappiness
+    echo
     echo -e "  ${G}${BOLD}✓ Оптимизация применена.${NC} ${DIM}Проверить: sudo bash node-diagnostic.sh diagnose. Откат: rollback${NC}"
 }
 
