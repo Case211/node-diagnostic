@@ -2,7 +2,7 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
-## [4.1.1] — не выпущено (ветка `fix/audit2-2026-07`)
+## [4.1.1] — в `main` с 2026-07-13
 
 Второй аудит — косяки, найденные живыми прогонами на Alpine (busybox) и non-root Debian.
 
