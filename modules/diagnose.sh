@@ -235,6 +235,7 @@ run_check() {
 # ────────────────────────────────────────────────────────────────────
 ensure_deps() {
     declare -A PKG_MAP=(
+        [ip]="iproute2:iproute:iproute2"
         [mpstat]="sysstat:sysstat:sysstat"
         [mtr]="mtr-tiny:mtr:mtr"
         [traceroute]="traceroute:traceroute:traceroute"
@@ -246,7 +247,9 @@ ensure_deps() {
         [jq]="jq:jq:jq"
     )
     local PKG_INSTALL="" IDX=0
-    if   have apt-get; then PKG_INSTALL="apt-get install -y -qq"; IDX=0
+    # apt: лок-таймаут — на Ubuntu unattended-upgrades часто держит dpkg-лок,
+    # без таймаута установка молча отваливается (или ждёт вечно на старых apt)
+    if   have apt-get; then PKG_INSTALL="apt-get -o DPkg::Lock::Timeout=60 install -y -qq"; IDX=0
     elif have dnf;     then PKG_INSTALL="dnf install -y -q";      IDX=1
     elif have yum;     then PKG_INSTALL="yum install -y -q";      IDX=1
     elif have apk;     then PKG_INSTALL="apk add --quiet";        IDX=2
@@ -262,16 +265,25 @@ ensure_deps() {
         fi
     done
     [ ${#NEED[@]} -eq 0 ] && return
+    echo "ensure_deps: ставлю ${!NEED[*]}"
     # индекс пакетов обновляем только когда реально есть что ставить —
     # иначе каждый прогон диагностики начинался с многосекундного apt-get update.
     # </dev/null обязателен: с унаследованным TTY debconf считает себя интерактивным
     # и СЪЕДАЕТ клавиатурный ввод юзера (меню после диагностики зависает на read)
-    if   have apt-get; then apt-get update -qq >/dev/null 2>&1 </dev/null || true
-    elif have apk;     then apk update -q      >/dev/null 2>&1 </dev/null || true
+    if   have apt-get; then apt-get -o DPkg::Lock::Timeout=60 update -qq >/dev/null 2>&1 </dev/null || true
+    elif have apk;     then apk update -q >/dev/null 2>&1 </dev/null || true
     fi
     # shellcheck disable=SC2086
     DEBIAN_FRONTEND=noninteractive $PKG_INSTALL ${!NEED[*]} >/dev/null 2>&1 </dev/null || true
+
+    # честный итог: что так и не появилось (чеки деградируют — юзер должен это видеть)
+    DEPS_MISSING=""
+    for cmd in "${!PKG_MAP[@]}"; do
+        have "$cmd" || DEPS_MISSING="$DEPS_MISSING $cmd"
+    done
+    [ -n "$DEPS_MISSING" ] && echo "ensure_deps: не установились:$DEPS_MISSING"
 }
+DEPS_MISSING=""
 
 # ════════════════════════════════════════════════════════════════════
 # ПРОВЕРКИ — каждая выставляет RES_STATUS и RES_SUMMARY
@@ -424,9 +436,16 @@ check_cpu() {
     if have mpstat; then
         local mp
         mp=$(mpstat -P ALL 1 1 2>/dev/null)
-        idle=$(echo "$mp"   | awk '/Average:.*all/ {print $NF}')
-        iow=$(echo "$mp"    | awk '/Average:.*all/ {print $6}')
-        softirq=$(echo "$mp"| awk '/Average:.*all/ {print $9}')
+        # колонки ищем по ИМЕНИ из заголовка: фиксированный $9 попадал в %steal
+        # (softirq-детект для RPS годами читал не ту колонку), а раскладка
+        # различается между версиями sysstat (%gnice) и busybox
+        idle=$(echo "$mp" | awk '/^Average:/ && $2=="all" {print $NF}')
+        iow=$(echo "$mp" | awk '
+            /%iowait/ && !c {for(i=1;i<=NF;i++) if($i=="%iowait") c=i}
+            /^Average:/ && $2=="all" {print $(c?c:6); exit}')
+        softirq=$(echo "$mp" | awk '
+            /%soft/ && !c {for(i=1;i<=NF;i++) if($i=="%soft") c=i}
+            /^Average:/ && $2=="all" {print $(c?c:8); exit}')
         echo "$mp"
     else
         idle="?"; iow="?"; softirq="?"
@@ -1518,6 +1537,9 @@ echo
 echo -ne "  ${DIM}Ставлю недостающие пакеты…${NC}"
 ensure_deps >>"$LOG" 2>&1
 echo -e "\r${CLR_LINE}  ${DIM}Лог: $LOG${NC}"
+if [ -n "$DEPS_MISSING" ]; then
+    echo -e "  ${Y}⚠${NC} ${DIM}не удалось поставить:${NC}${DEPS_MISSING} ${DIM}— часть проверок будет пропущена/урезана${NC}"
+fi
 echo
 
 # Глобальные значения для фиксов (нужны вне subshell'ов)
