@@ -50,7 +50,20 @@ vlen() {
     printf '%s' "${#s}"
 }
 
-ND_BOX_W="${ND_BOX_W:-58}"          # внутренняя ширина карточки (контент)
+# Ширина карточки адаптируется под терминал: на узком SSH-клиенте фикс-58
+# переносил бы рамки. Полная карточка = ND_BOX_W+6 колонок (отступ+рамка+поля).
+_detect_cols() {
+    local c=""
+    [ -t 1 ] && c=$( { tput cols; } 2>/dev/null )
+    [ -z "$c" ] && c="${COLUMNS:-}"
+    case "$c" in ''|*[!0-9]*) c=80 ;; esac   # не-TTY/мусор → безопасные 80
+    printf '%s' "$c"
+}
+if [ -z "${ND_BOX_W:-}" ]; then
+    _cols=$(_detect_cols)
+    if [ "$_cols" -ge 66 ]; then ND_BOX_W=58            # штатный широкий терминал
+    else ND_BOX_W=$(( _cols - 8 )); [ "$ND_BOX_W" -lt 30 ] && ND_BOX_W=30; fi
+fi
 # горизонтальная линия нужной длины (режем заранее готовую по символам — UTF-8-safe)
 ND_HR=""; while [ "${#ND_HR}" -lt "$((ND_BOX_W + 4))" ]; do ND_HR="${ND_HR}─"; done
 
