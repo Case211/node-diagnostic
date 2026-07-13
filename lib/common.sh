@@ -10,7 +10,7 @@ ND_COMMON_LOADED=1
 # рамки карточек и паддинг кириллицы едут. Экспорт наследуется в под-процессы модулей.
 export LANG=C.UTF-8
 
-ND_VERSION="4.1.1"
+ND_VERSION="4.2.0"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
 
 # ────────────────────────────────────────────────────────────────────
