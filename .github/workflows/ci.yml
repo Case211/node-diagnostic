@@ -24,6 +24,21 @@ jobs:
         # sudo: nft -c требует netlink (CAP_NET_ADMIN) — без root проверка ruleset молча скипалась
         run: sudo bash tests/smoke.sh
 
+  # ubuntu:22.04/24.04 в docker — там awk=mawk (на runner'е gawk): боевое окружение нод
+  smoke-ubuntu-lts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tag: ["22.04", "24.04"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke in ubuntu:${{ matrix.tag }}
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w ubuntu:${{ matrix.tag }} bash -c '
+            apt-get update -qq
+            apt-get install -y -qq bash iproute2 procps nftables python3 grep sed coreutils >/dev/null
+            bash tests/smoke.sh'
+
   smoke-debian:
     runs-on: ubuntu-latest
     steps:
@@ -33,4 +48,14 @@ jobs:
           docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w debian:12 bash -c '
             apt-get update -qq
             apt-get install -y -qq bash iproute2 procps nftables python3 gawk grep sed coreutils >/dev/null
+            bash tests/smoke.sh'
+
+  smoke-alpine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke in alpine:3.19 (busybox-окружение)
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w alpine:3.19 sh -c '
+            apk add -q bash nftables python3 >/dev/null
             bash tests/smoke.sh'

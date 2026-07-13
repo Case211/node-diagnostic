@@ -109,7 +109,12 @@ menu_diagnose() {
     esac
 }
 
-is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+is_ipv4() {
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local o
+    for o in "${BASH_REMATCH[@]:1}"; do [ "$o" -le 255 ] || return 1; done
+}
+is_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
 menu_protect() {
     if [ ! -t 0 ]; then run protect; return; fi
@@ -121,8 +126,12 @@ menu_protect() {
         [ -z "$pip" ] || is_ipv4 "$pip" && break
         echo -e "    ${Y}это не IPv4-адрес${NC} ${DIM}(firewall.nft ждёт именно IPv4)${NC}"
     done
-    printf "  NODE_PORT (панель→нода) ${DIM}[Enter — автодетект из .env/docker]${NC}: "
-    read -r np
+    while true; do
+        printf "  NODE_PORT (панель→нода) ${DIM}[Enter — автодетект из .env/docker]${NC}: "
+        read -r np
+        [ -z "$np" ] || is_port "$np" && break
+        echo -e "    ${Y}порт — это число 1-65535${NC}"
+    done
     local args=()
     [ -n "$pip" ] && args+=(--panel-ip "$pip")
     [ -n "$np" ]  && args+=(--node-port "$np")

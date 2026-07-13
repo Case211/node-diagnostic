@@ -17,21 +17,32 @@ say "node-diagnostic → $DEST  (ref: $REF)"
 
 if have git; then
     if [ -d "$DEST/.git" ]; then
-        git -C "$DEST" fetch --depth 1 origin "$REF" >/dev/null 2>&1
-        git -C "$DEST" reset --hard "origin/$REF" >/dev/null 2>&1
-        say "обновлено через git"
+        # FETCH_HEAD вместо origin/$REF — работает и для ветки, и для тега
+        # (origin/<тег> не существует, старый вариант на теге молча умирал)
+        if git -C "$DEST" fetch --depth 1 origin "$REF" >/dev/null 2>&1 \
+           && git -C "$DEST" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+            say "обновлено через git"
+        else
+            say "ОШИБКА: не смог обновить $DEST (нет сети? ref '$REF' существует?)"
+            exit 1
+        fi
     else
         rm -rf "$DEST"
-        git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DEST"
+        git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DEST" \
+            || { say "ОШИБКА: клонирование не удалось ($REPO, ref '$REF')"; exit 1; }
         say "склонировано через git"
     fi
 else
-    # без git — качаем tarball ветки
+    # без git — tarball; пробуем ветку, затем тег
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-    url="$REPO/archive/refs/heads/$REF.tar.gz"
-    if   have curl; then curl -fsSL "$url" -o "$tmp/src.tgz"
-    elif have wget; then wget -qO "$tmp/src.tgz" "$url"
-    else say "нужен git, curl или wget"; exit 1; fi
+    fetch() {
+        if   have curl; then curl -fsSL "$1" -o "$tmp/src.tgz"
+        elif have wget; then wget -qO "$tmp/src.tgz" "$1"
+        else say "нужен git, curl или wget"; exit 1; fi
+    }
+    fetch "$REPO/archive/refs/heads/$REF.tar.gz" \
+        || fetch "$REPO/archive/refs/tags/$REF.tar.gz" \
+        || { say "ОШИБКА: не скачал tarball для ref '$REF'"; exit 1; }
     tar -xzf "$tmp/src.tgz" -C "$tmp"
     mkdir -p "$DEST"
     cp -r "$tmp"/node-diagnostic-*/. "$DEST/"

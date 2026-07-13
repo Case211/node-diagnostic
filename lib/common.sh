@@ -6,7 +6,7 @@
 [ -n "${ND_COMMON_LOADED:-}" ] && return 0
 ND_COMMON_LOADED=1
 
-ND_VERSION="4.1.0"
+ND_VERSION="4.1.1"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
 
 # ────────────────────────────────────────────────────────────────────
@@ -96,8 +96,11 @@ write_dropin() {
     { echo "# Managed by node-diagnostic ($ND_VERSION). Откат: rm этот файл + sysctl --system"; cat; } > "$target"
     if sysctl --system >/dev/null 2>&1; then
         msg_ok "$target применён"
+    elif sysctl -p "$target" >/dev/null 2>&1; then
+        # busybox sysctl (Alpine) не знает --system — применяем хотя бы наш файл
+        msg_ok "$target применён (sysctl -p)"
     else
-        msg_warn "$target записан, но sysctl --system вернул ошибку (часть ключей может быть недоступна на этом ядре)"
+        msg_warn "$target записан, но sysctl вернул ошибку (часть ключей может быть недоступна на этом ядре)"
     fi
     record_fix "sysctl dropin $target"
 }

@@ -48,6 +48,16 @@ protect_generate() {
     local ssh_port ssh_ip out
     ssh_port=$(detect_ssh_port)
     ssh_ip=$(ssh_client_ip)
+    # шаблоны firewall написаны под IPv4 (ip saddr / set ipv4_addr) — v6-адрес
+    # в них молча ломает применение, лучше честный плейсхолдер + предупреждение
+    case "$ssh_ip" in
+        *:*) msg_warn "текущая SSH-сессия по IPv6 ($ssh_ip) — шаблон правил под IPv4: подставь свой v4 или добавь «ip6 saddr» вручную"
+             ssh_ip="" ;;
+    esac
+    case "$PANEL_IP" in
+        *:*) msg_warn "IP панели задан как IPv6 ($PANEL_IP) — set panel_ip в шаблоне типа ipv4_addr: подставь v4 или перепиши set на ipv6_addr"
+             PANEL_IP="" ;;
+    esac
     [ -z "$NODE_PORT" ] && NODE_PORT=$(detect_node_port || echo "")
     if need_root; then out="${PROTECT_OUT:-/root/node-diagnostic-protect}"; else out="${PROTECT_OUT:-$PWD/node-diagnostic-protect}"; fi
     mkdir -p "$out" || die "не создал каталог $out"
@@ -136,7 +146,14 @@ table inet node_protect {
         limit rate 5/minute log prefix "node_protect drop: " level info
         counter drop
     }
-    chain forward { type filter hook forward priority 0; policy accept; }
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+        # Если remnanode крутится в docker BRIDGE-сети (порт опубликован через -p),
+        # трафик к нему проходит DNAT и попадает сюда, а НЕ в input — правило
+        # NODE_PORT выше его не видит. Тогда раскомментируй (фильтр по исходному dport):
+        # ct original proto-dst $node_port ip saddr != @panel_ip ct state new drop
+        # Для штатного remnanode с network_mode: host это не нужно — работает input.
+    }
     chain output  { type filter hook output  priority 0; policy accept; }
 }
 EOF
@@ -156,7 +173,9 @@ ufw allow from $ssh_ip to any port $ssh_port proto tcp comment 'SSH (твой IP
 ufw allow 443 comment 'VLESS/Reality + QUIC/HY2'
 ufw allow 80/tcp comment 'ACME/Caddy'
 ufw allow from $panel to any port $node_port proto tcp comment 'Remnawave control-API (панель)'
-ufw limit $ssh_port/tcp comment 'анти-брут SSH'
+# ВАЖНО: НЕ добавляй «ufw limit $ssh_port/tcp» — limit в ufw это ALLOW отовсюду
+# (с рейт-лимитом): такое правило открыло бы SSH всему интернету и обесценило
+# ограничение по IP выше. Анти-брут делает fail2ban.
 ufw --force enable
 ufw status verbose
 EOF
@@ -171,6 +190,7 @@ _gen_fail2ban() {
 [sshd]
 enabled  = true
 port     = $ssh_port
+# без systemd (Alpine/OpenRC): замени backend на auto и добавь logpath = /var/log/messages
 backend  = systemd
 maxretry = 4
 findtime = 10m
@@ -185,7 +205,10 @@ EOF
 _gen_sshd() {
     local out=$1 has_key="нет"
     # проверим, есть ли вообще ключи (иначе key-only лок-аут)
-    if grep -rqsE 'ssh-(rsa|ed25519|ecdsa)' /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys 2>/dev/null; then
+    # ecdsa-ключи в authorized_keys называются ecdsa-sha2-nistpN (не «ssh-ecdsa»),
+    # FIDO-ключи — sk-…: старый регекс их не видел и зря пугал лок-аутом
+    if grep -rqsE '(ssh-(rsa|ed25519)|ecdsa-sha2-nistp[0-9]+|sk-(ssh-ed25519|ecdsa-sha2))' \
+        /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys 2>/dev/null; then
         has_key="да"
     fi
     cat > "$out/sshd-hardening.conf" <<EOF
@@ -259,6 +282,9 @@ _gen_apply() {
 
 Карта портов Remnawave-ноды: 443 (вход), 80 (ACME), NODE_PORT (панель->нода, только IP панели),
 61000/localhost и Caddy :9443/localhost наружу НЕ открываются.
+⚠ remnanode в docker BRIDGE (порт через -p): фильтр NODE_PORT в input его не видит
+  (трафик идёт через forward после DNAT) — раскомментируй правило в chain forward
+  файла firewall.nft. Штатный remnanode с network_mode: host — ничего не нужно.
 ======================================================================
 EOF
 }
