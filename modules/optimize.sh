@@ -277,6 +277,13 @@ opt_mss_clamp() {
     done
     [ "$DRY_RUN" = "1" ] && return 0
     backup_settings
+    # persist: netfilter-persistent; на apt-дистро при его отсутствии ставим сами
+    # (</dev/null + noninteractive — debconf в TTY съедает клавиатурный ввод юзера)
+    if ! have netfilter-persistent && have apt-get; then
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 \
+            install -y -qq iptables-persistent >/dev/null 2>&1 </dev/null || true
+        have netfilter-persistent && msg_ok "поставил iptables-persistent (для сохранения правил)"
+    fi
     if have netfilter-persistent; then
         netfilter-persistent save >/dev/null 2>&1 && msg_ok "netfilter-persistent save"
     elif [ -d /etc/iptables ] && have iptables-save; then
