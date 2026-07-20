@@ -169,8 +169,9 @@ cpu_mask() {
 
 # shellcheck disable=SC2120  # iface — опциональный аргумент (обычно берётся из default_iface)
 opt_rps() {
+    ensure_pkg ip iproute2 iproute iproute2 >/dev/null 2>&1 || true
     local iface="${1:-$(default_iface)}"
-    [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
+    [ -z "$iface" ] && { msg_err "интерфейс не определён — нет iproute2 (поставь пакет iproute2)"; return 1; }
     local n mask; n=$(nproc); mask=$(cpu_mask "$n")
     ui_head "RPS/RFS/XPS" "mask=$mask на $iface"
 
@@ -220,8 +221,10 @@ UNIT
 # ── 4. NIC: ring buffers + offloads + txqueuelen ─────────────────────
 # shellcheck disable=SC2120  # iface — опциональный аргумент (обычно берётся из default_iface)
 opt_nic() {
+    ensure_pkg ip iproute2 iproute iproute2 >/dev/null 2>&1 || true
+    ensure_pkg ethtool ethtool ethtool ethtool >/dev/null 2>&1 || true
     local iface="${1:-$(default_iface)}"
-    [ -z "$iface" ] && { msg_err "интерфейс не определён"; return 1; }
+    [ -z "$iface" ] && { msg_err "интерфейс не определён — нет iproute2 (поставь пакет iproute2)"; return 1; }
     have ethtool || { msg_warn "нет ethtool — пропускаю (apt install ethtool)"; return 0; }
     ui_head "NIC tuning" "ring max + gro/gso/tso + txqueuelen на $iface"
 
@@ -262,6 +265,7 @@ UNIT
 
 # ── 5. iptables MSS clamp (большие чанки не упираются в Frag-needed) ──
 opt_mss_clamp() {
+    ensure_pkg iptables iptables iptables iptables >/dev/null 2>&1 || true
     have iptables || { msg_warn "нет iptables — пропускаю MSS clamp"; return 0; }
     ui_head "MSS clamp" "iptables TCPMSS --clamp-mss-to-pmtu (FORWARD/OUTPUT)"
     # SYN,RST — маска флагов iptables (один аргумент), не разделитель массива
