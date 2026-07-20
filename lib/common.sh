@@ -10,7 +10,7 @@ ND_COMMON_LOADED=1
 # рамки карточек и паддинг кириллицы едут. Экспорт наследуется в под-процессы модулей.
 export LANG=C.UTF-8
 
-ND_VERSION="4.2.0"
+ND_VERSION="4.3.0"
 ND_DROPIN_PREFIX="99-node-diagnostic"        # namespace для всех наших sysctl.d / systemd артефактов
 
 # ────────────────────────────────────────────────────────────────────
@@ -129,6 +129,35 @@ ui_divider() {   # ui_divider "ТЕКСТ" — линия с центриров�
 have()      { command -v "$1" >/dev/null 2>&1; }
 need_root() { [ "$(id -u)" -eq 0 ]; }
 
+# Установить пакет, если команды нет (root + пакетный менеджер; тихо, лок-таймаут).
+# ensure_pkg <cmd> <apt_pkg> <dnf_pkg> <apk_pkg> — return 0, если команда доступна после.
+# </dev/null + noninteractive: иначе debconf с унаследованным TTY съедает ввод юзера.
+# apt-get update гоняем максимум раз за процесс (флаг _ND_APT_UPDATED).
+ensure_pkg() {
+    have "$1" && return 0
+    need_root || return 1
+    if   have apt-get; then
+        [ -z "${_ND_APT_UPDATED:-}" ] && {
+            apt-get -o DPkg::Lock::Timeout=60 update -qq >/dev/null 2>&1 </dev/null || true
+            _ND_APT_UPDATED=1
+        }
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq "$2" >/dev/null 2>&1 </dev/null || true
+    elif have dnf; then dnf install -y -q "$3" >/dev/null 2>&1 </dev/null || true
+    elif have yum; then yum install -y -q "$3" >/dev/null 2>&1 </dev/null || true
+    elif have apk; then
+        [ -z "${_ND_APK_UPDATED:-}" ] && { apk update -q >/dev/null 2>&1 </dev/null || true; _ND_APK_UPDATED=1; }
+        apk add --quiet "$4" >/dev/null 2>&1 </dev/null || true
+    fi
+    have "$1"
+}
+
+# Спросить да/нет (по умолчанию НЕТ). confirm "Текст?" — return 0 при y/yes.
+confirm() {
+    local a
+    echo -en "    ${Y}$1${NC} ${DIM}[y/N]${NC}: "
+    read -r a
+    [ "${a,,}" = "y" ] || [ "${a,,}" = "yes" ]
+}
 msg_ok()   { echo -e "    ${G}${I_OK}${NC} $*"; }
 msg_warn() { echo -e "    ${Y}${I_WARN}${NC} $*"; }
 msg_err()  { echo -e "    ${R}${I_BAD}${NC} $*"; }

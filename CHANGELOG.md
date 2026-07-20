@@ -2,6 +2,21 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [4.3.0] — в `main` с 2026-07-20
+
+Провижининг ноды из меню и надёжный `optimize` на минимальных образах.
+
+### Added
+- **Меню: пункт «Установка Remnanode»** (`[7]`, команда `install`, модуль `modules/install.sh`) с четырьмя сабкомандами. Внешние установщики запускаются только после явного подтверждения (показ команды + `confirm`).
+  - `node` — установщик ноды Remnawave (`remnanode.sh @ install`, DigneZzZ/remnawave-scripts).
+  - `selfsteal` — установщик Selfsteal (`selfsteal.sh @ install`).
+  - `netbird` — агент NetBird (`pkgs.netbird.io/install.sh`) + `netbird up --setup-key` (ключ спрашивается интерактивно).
+  - `monitoring` — cAdvisor 0.53.0 + node_exporter 1.9.1 + vmagent (vmutils 1.123.0) точно по гайду wiki.egam.es: `/opt/monitoring`, конфиги `scrape.yml`/`conf.d`, три systemd-юнита; спрашивает имя инстанса и IP сервера мониторинга (NetBird) для `remoteWrite`; всё слушает `127.0.0.1`; гейты root/amd64/systemd.
+- **`lib/common.sh`: общий `confirm()`** (y/N-подтверждение).
+
+### Fixed
+- **`optimize` сам ставит свои зависимости** (`iproute2`/`ethtool`/`iptables`). Раньше их тянул только `diagnose` — на минимальной ноде без `iproute2` `default_iface` слепла и RPS/RFS/XPS + NIC-тюнинг молча пропускались («интерфейс не определён»). Добавлен `ensure_pkg` в `lib/common.sh` (root + пакетный менеджер, `apt update` максимум раз за процесс).
+
 ## [4.2.0] — в `main` с 2026-07-13
 
 Единый визуальный язык на весь тулкит, полноценный dual-stack IPv6, проверенные до конца установочные пути и новый чек безопасности. XanMod-путь впервые прогнан живьём (ключ → репо → пакет ядра → prereboot-чеки) на Ubuntu 24.04 и Debian 12.

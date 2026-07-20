@@ -52,6 +52,8 @@ node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Re
                                  BBRv3 через XanMod-ядро (гейт контейнеров, без автоперезагрузки)
   rollback [--yes|--dry-run]     Откат наложенных оптимизаций (namespaced-артефакты)
   status                         Что наложено на систему, ядро, cc/qdisc
+  install {node|selfsteal|netbird|monitoring}
+                                 Установка ноды Remnawave / Selfsteal / NetBird / мониторинга
   menu                           Интерактивное меню (по умолчанию в TTY)
   help | --version
 
@@ -69,9 +71,10 @@ menu() {
         echo -e "    ${C}${BOLD}[4]${NC} BBRv3-ядро         ${DIM}XanMod, нужен reboot${NC}"
         echo -e "    ${C}${BOLD}[5]${NC} Откат              ${DIM}снять наложенные оптимизации${NC}"
         echo -e "    ${C}${BOLD}[6]${NC} Статус             ${DIM}что применено, ядро, cc/qdisc${NC}"
+        echo -e "    ${C}${BOLD}[7]${NC} Установка Remnanode ${DIM}нода/Selfsteal/NetBird/мониторинг${NC}"
         echo -e "    ${C}${BOLD}[0]${NC} Выход"
         echo
-        printf "  ${BOLD}Выбор${NC} ${DIM}[0-6]${NC}: "
+        printf "  ${BOLD}Выбор${NC} ${DIM}[0-7]${NC}: "
         local c; read -r c
         echo
         case "$c" in
@@ -81,6 +84,7 @@ menu() {
             4) run bbr3 ;;
             5) run rollback ;;
             6) show_status ;;
+            7) menu_install ;;
             0|q|"") echo -e "  ${DIM}выход${NC}"; return 0 ;;
             *) echo -e "  ${Y}нет такого пункта${NC}" ;;
         esac
@@ -181,6 +185,25 @@ menu_protect() {
     run protect ${args[@]+"${args[@]}"}
 }
 
+menu_install() {
+    if [ ! -t 0 ]; then echo -e "  ${Y}установка доступна только в интерактивном режиме${NC}"; return 0; fi
+    echo -e "  ${BOLD}Установка Remnanode${NC}"
+    echo -e "    ${C}${BOLD}[1]${NC} Нода Remnawave     ${DIM}remnanode.sh @ install${NC}"
+    echo -e "    ${C}${BOLD}[2]${NC} Selfsteal          ${DIM}selfsteal.sh @ install${NC}"
+    echo -e "    ${C}${BOLD}[3]${NC} NetBird            ${DIM}агент + setup-key${NC}"
+    echo -e "    ${C}${BOLD}[4]${NC} Мониторинг         ${DIM}cAdvisor+node_exporter+vmagent${NC}"
+    echo -e "    ${C}${BOLD}[0]${NC} Назад"
+    printf "  ${BOLD}Выбор${NC} ${DIM}[0-4]${NC}: "; local c; read -r c; echo
+    case "$c" in
+        1) run install node ;;
+        2) run install selfsteal ;;
+        3) run install netbird ;;
+        4) run install monitoring ;;
+        0|q|"") return 0 ;;
+        *) echo -e "  ${Y}нет такого пункта${NC}" ;;
+    esac
+}
+
 # ── диспетчер ────────────────────────────────────────────────────────
 cmd="${1:-}"; [ $# -gt 0 ] && shift || true
 case "$cmd" in
@@ -190,6 +213,7 @@ case "$cmd" in
     bbr3|kernel)           run bbr3 "$@" ;;
     rollback|revert)       run rollback "$@" ;;
     status|st)             show_status ;;
+    install|setup)         run install "$@" ;;
     menu)                  menu ;;
     help|-h|--help)        usage ;;
     --version|-V)          echo "node-diagnostic $ND_VERSION" ;;
