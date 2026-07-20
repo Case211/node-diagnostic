@@ -43,8 +43,9 @@ node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Re
 
 Команды:
   diagnose [-q|-v|--no-net]      Диагностика ноды (27 чеков, дашборд, вердикт)
-  optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--dry-run]
-                                 Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS clamp
+  optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--irqbalance|--journald|--zram|--dry-run]
+                                 Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS/irqbalance/journald
+                                 --all включает irqbalance+journald; --zram (zram-swap) — только явно
                                  --from-findings — только фиксы по находкам последней диагностики
   protect  [--panel-ip IP] [--node-port N] [--out DIR]
                                  Защита под Remnawave (firewall/fail2ban/SSH) — ГЕНЕРАЦИЯ, не применяет
@@ -111,10 +112,11 @@ show_status() {
     local found=0 f
     for f in /etc/sysctl.d/${ND_DROPIN_PREFIX}-*.conf \
              /etc/security/limits.d/99-node-diagnostic.conf \
-             /etc/modules-load.d/${ND_DROPIN_PREFIX}.conf; do
+             /etc/modules-load.d/${ND_DROPIN_PREFIX}.conf \
+             /etc/systemd/journald.conf.d/99-node-diagnostic.conf; do
         [ -e "$f" ] && { box_row "${C_OK}${I_OK}${NC} ${f}"; found=1; }
     done
-    for svc in node-diagnostic-rps node-diagnostic-nic; do
+    for svc in node-diagnostic-rps node-diagnostic-nic node-diagnostic-zram; do
         [ -e "/etc/systemd/system/$svc.service" ] && { box_row "${C_OK}${I_OK}${NC} ${svc}.service"; found=1; }
     done
     if have iptables && iptables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
@@ -136,10 +138,11 @@ show_status() {
 menu_optimize() {
     if [ ! -t 0 ]; then run optimize --all; return; fi
     echo -e "  ${BOLD}Оптимизация${NC}"
-    echo -e "    ${DIM}[a] всё   [f] по находкам диагностики   [d] предпросмотр (dry-run)   [Enter] всё${NC}"
+    echo -e "    ${DIM}[a] всё   [f] по находкам   [z] zram-swap   [d] предпросмотр (dry-run)   [Enter] всё${NC}"
     printf "  выбор: "; local c; read -r c
     case "${c,,}" in
         f) run optimize --from-findings ;;
+        z) run optimize --zram ;;
         d) run optimize --dry-run ;;
         *) run optimize --all ;;
     esac

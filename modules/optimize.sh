@@ -62,6 +62,9 @@ net.ipv4.tcp_min_snd_mss = 512
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_notsent_lowat = 131072
 net.ipv4.tcp_fastopen = 3
+# ECN=2: принимаем ECN от клиента пассивно, но не инициируем на исходящих
+# (безопаснее 1 на путях с битыми middlebox к апстримам)
+net.ipv4.tcp_ecn = 2
 
 # Буферы (масштаб по RAM)
 net.core.rmem_max = $sock_max
@@ -75,6 +78,9 @@ net.ipv4.udp_wmem_min = 16384
 
 # Очереди / бэклоги
 net.core.netdev_max_backlog = 16384
+# softirq-бюджет: сколько пакетов дренировать за цикл (дефолт 300) — потолок под high-PPS
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
 net.core.somaxconn = 8192
 net.ipv4.tcp_max_syn_backlog = 8192
 
@@ -97,6 +103,9 @@ net.ipv4.ip_local_port_range = 10000 65535
 # Anti-spoof / redirects (rp_filter=2 loose — strict=1 рубит асимметрию host-network нод)
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
+# src_valid_mark=1 — пропускать marked-пакеты (WireGuard/WARP fwmark) через
+# reverse-path проверку; иначе исходящий WARP/WG на ноде может молча отваливаться
+net.ipv4.conf.all.src_valid_mark = 1
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.all.secure_redirects = 0
@@ -233,13 +242,15 @@ opt_nic() {
     max_tx=$(ethtool -g "$iface" 2>/dev/null | awk '/^TX:/{print $2; exit}')
 
     if [ "$DRY_RUN" = "1" ]; then
-        echo -e "    ${DIM}[dry-run]${NC} ethtool -G $iface rx $max_rx tx $max_tx; -K gro/gso/tso on; txqueuelen 10000"
+        echo -e "    ${DIM}[dry-run]${NC} ethtool -G $iface rx $max_rx tx $max_tx; -K gro/gso/tso on lro off; txqueuelen 10000"
         return 0
     fi
     backup_settings
     [ -n "$max_rx" ] && ethtool -G "$iface" rx "$max_rx" 2>/dev/null || true
     [ -n "$max_tx" ] && ethtool -G "$iface" tx "$max_tx" 2>/dev/null || true
-    ethtool -K "$iface" gro on gso on tso on 2>/dev/null || true
+    # gro/gso/tso on (обратимы, ускоряют), НО lro off — LRO необратимо склеивает
+    # пакеты и ЛОМАЕТ форвардинг на роутящей/VPN-ноде
+    ethtool -K "$iface" gro on gso on tso on lro off 2>/dev/null || true
     ip link set "$iface" txqueuelen 10000 2>/dev/null || true
     msg_ok "ring/offloads/txqueuelen применены"
 
@@ -305,6 +316,79 @@ vm.swappiness = 10
 EOF
 }
 
+# ── irqbalance: раскидать IRQ NIC по ядрам (для multi-queue — основной механизм) ──
+opt_irqbalance() {
+    ui_head "irqbalance" "распределение прерываний NIC по ядрам"
+    if [ "$(nproc)" -le 1 ]; then msg_info "1 ядро — irqbalance не нужен"; return 0; fi
+    if [ "$DRY_RUN" = "1" ]; then echo -e "    ${DIM}[dry-run]${NC} ensure irqbalance + enable --now"; return 0; fi
+    ensure_pkg irqbalance irqbalance irqbalance irqbalance >/dev/null 2>&1 || true
+    have irqbalance || { msg_warn "нет пакета irqbalance — пропускаю"; return 0; }
+    if have systemctl && [ -d /etc/systemd/system ]; then
+        systemctl enable --now irqbalance >/dev/null 2>&1 \
+            && { msg_ok "irqbalance включён"; record_fix "irqbalance enabled"; } \
+            || msg_warn "не удалось включить irqbalance"
+    else
+        msg_warn "нет systemd — запусти irqbalance вручную"
+    fi
+}
+
+# ── journald cap: флуд логов/сканов не забивает диск и inodes ─────────
+opt_journald() {
+    ui_head "journald cap" "лимит журнала 300M + сжатие"
+    if ! have systemctl || [ ! -d /etc/systemd ]; then msg_info "нет systemd-journald — пропускаю"; return 0; fi
+    if [ "$DRY_RUN" = "1" ]; then echo -e "    ${DIM}[dry-run]${NC} journald.conf.d SystemMaxUse=300M Compress=yes"; return 0; fi
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > /etc/systemd/journald.conf.d/99-node-diagnostic.conf <<'EOF'
+[Journal]
+SystemMaxUse=300M
+SystemKeepFree=500M
+SystemMaxFileSize=50M
+Compress=yes
+EOF
+    systemctl restart systemd-journald 2>/dev/null || true
+    msg_ok "лимит журнала 300M"
+    record_fix "journald cap (SystemMaxUse=300M)"
+}
+
+# ── zram-swap (opt-in): компрессированный swap в RAM, анти-OOM без дисковых просадок ──
+opt_zram() {
+    ui_head "zram-swap" "компрессированный swap в RAM (lz4, ~50% RAM)"
+    need_root || die "нужен root"
+    local mem_mb zram_mb
+    mem_mb=$(( $(_mem_kb)/1024 )); zram_mb=$(( mem_mb / 2 ))
+    [ "$zram_mb" -lt 128 ] && zram_mb=128
+    if [ "$DRY_RUN" = "1" ]; then echo -e "    ${DIM}[dry-run]${NC} zram0 ${zram_mb}M lz4 · swapon -p 100 · persist-юнит"; return 0; fi
+    modprobe zram 2>/dev/null || { msg_warn "модуль zram недоступен в ядре — пропускаю"; return 0; }
+    swapon --show=NAME 2>/dev/null | grep -q '^/dev/zram0$' && swapoff /dev/zram0 2>/dev/null || true
+    { echo 1 > /sys/block/zram0/reset; } 2>/dev/null || true
+    { echo lz4 > /sys/block/zram0/comp_algorithm; } 2>/dev/null || true
+    if ! { echo "${zram_mb}M" > /sys/block/zram0/disksize; } 2>/dev/null; then
+        msg_warn "не удалось задать disksize zram0 — пропускаю"; return 0
+    fi
+    mkswap /dev/zram0 >/dev/null 2>&1
+    if swapon -p 100 /dev/zram0 2>/dev/null; then
+        msg_ok "zram0 ${zram_mb}M lz4 (приоритет 100)"
+    else
+        msg_warn "swapon zram0 не удался"; return 0
+    fi
+    if have systemctl && [ -d /etc/systemd/system ]; then
+        cat > /etc/systemd/system/node-diagnostic-zram.service <<UNIT
+[Unit]
+Description=node-diagnostic zram swap
+After=local-fs.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'modprobe zram; echo lz4 > /sys/block/zram0/comp_algorithm; echo ${zram_mb}M > /sys/block/zram0/disksize; mkswap /dev/zram0; swapon -p 100 /dev/zram0'
+ExecStop=/bin/bash -c 'swapoff /dev/zram0 || true'
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl enable node-diagnostic-zram.service >/dev/null 2>&1 || true
+        record_fix "zram swap ${zram_mb}M (node-diagnostic-zram.service)"
+    fi
+}
+
 opt_all() {
     [ "$DRY_RUN" = "1" ] || need_root || die "нужен root для применения фиксов."
     # ui_head сам даёт верхний отступ секции — отдельные echo больше не нужны
@@ -314,6 +398,8 @@ opt_all() {
     opt_nic
     opt_mss_clamp
     opt_swappiness
+    opt_irqbalance
+    opt_journald
     echo
     echo -e "  ${G}${BOLD}✓ Оптимизация применена.${NC} ${DIM}Проверить: sudo bash node-diagnostic.sh diagnose. Откат: rollback${NC}"
 }
@@ -348,7 +434,7 @@ opt_from_findings() {
 }
 
 opt_main() {
-    local do_all=1 ff=0 s=0 l=0 r=0 nic=0 mss=0 sw=0
+    local do_all=1 ff=0 s=0 l=0 r=0 nic=0 mss=0 sw=0 irq=0 jr=0 z=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --all)           do_all=1 ;;
@@ -359,6 +445,9 @@ opt_main() {
             --nic)     do_all=0; nic=1 ;;
             --mss)     do_all=0; mss=1 ;;
             --swap)    do_all=0; sw=1 ;;
+            --irqbalance) do_all=0; irq=1 ;;
+            --journald)   do_all=0; jr=1 ;;
+            --zram)       do_all=0; z=1 ;;
             --dry-run) DRY_RUN=1 ;;
             *) die "optimize: неизвестный аргумент $1" ;;
         esac
@@ -373,6 +462,9 @@ opt_main() {
     [ "$nic" = "1" ] && { opt_nic; echo; }
     [ "$mss" = "1" ] && { opt_mss_clamp; echo; }
     [ "$sw" = "1" ]  && { opt_swappiness; echo; }
+    [ "$irq" = "1" ] && { opt_irqbalance; echo; }
+    [ "$jr" = "1" ]  && { opt_journald; echo; }
+    [ "$z" = "1" ]   && { opt_zram; echo; }
 }
 
 if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then

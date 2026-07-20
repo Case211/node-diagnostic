@@ -34,10 +34,12 @@ rollback_all() {
     _rm /etc/security/limits.d/99-node-diagnostic.conf
     _rm /etc/systemd/system.conf.d/99-node-diagnostic-limits.conf
     _rm /etc/systemd/user.conf.d/99-node-diagnostic-limits.conf
+    # journald cap
+    _rm /etc/systemd/journald.conf.d/99-node-diagnostic.conf
 
-    # systemd-юниты (RPS/NIC)
+    # systemd-юниты (RPS/NIC/zram; для zram disable --now дёргает ExecStop=swapoff)
     local svc
-    for svc in node-diagnostic-rps node-diagnostic-nic; do
+    for svc in node-diagnostic-rps node-diagnostic-nic node-diagnostic-zram; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^$svc.service"; then
             if [ "$DRY_RUN" = "1" ]; then
                 echo -e "    ${DIM}[dry-run]${NC} systemctl disable --now $svc.service"
@@ -67,8 +69,20 @@ rollback_all() {
         done
     fi
 
+    # zram-swap: снять, если наш zram0 всё ещё активен (например, без systemd)
+    if swapon --show=NAME 2>/dev/null | grep -q '^/dev/zram0$'; then
+        if [ "$DRY_RUN" = "1" ]; then
+            echo -e "    ${DIM}[dry-run]${NC} swapoff /dev/zram0 (zram)"
+        else
+            swapoff /dev/zram0 2>/dev/null && msg_ok "снят zram0 swap"
+            { echo 1 > /sys/block/zram0/reset; } 2>/dev/null || true
+        fi
+        removed=$((removed+1))
+    fi
+
     if [ "$DRY_RUN" != "1" ]; then
         systemctl daemon-reload 2>/dev/null || true
+        systemctl try-restart systemd-journald 2>/dev/null || true
         sysctl --system >/dev/null 2>&1 || true
         record_fix "rollback: removed $removed artifacts"
     fi
