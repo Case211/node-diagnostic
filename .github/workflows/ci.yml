@@ -14,6 +14,24 @@ jobs:
       - name: shellcheck (severity=warning)
         run: shellcheck --severity=warning --shell=bash node-diagnostic.sh install.sh lib/common.sh modules/*.sh tests/smoke.sh
 
+  # компиляция eBPF-шейпера (nd-shaper.bpf.c) — чтобы правки BPF-программы
+  # не ломались молча; сам attach проверяется только на живой ноде
+  bpf-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install clang + libbpf
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev gcc-multilib
+      - name: compile modules/nd-shaper.bpf.c (-target bpf)
+        run: |
+          inc=""
+          [ -d /usr/include/x86_64-linux-gnu ] && inc="-I/usr/include/x86_64-linux-gnu"
+          clang -O2 -g -Wall -target bpf $inc -c modules/nd-shaper.bpf.c -o /tmp/nd-shaper.bpf.o
+          test -s /tmp/nd-shaper.bpf.o
+          readelf -S /tmp/nd-shaper.bpf.o | grep -q 'classifier/down'
+          readelf -S /tmp/nd-shaper.bpf.o | grep -q 'classifier/up'
+          echo "BPF compiled OK (classifier/down + classifier/up)"
+
   smoke-ubuntu:
     runs-on: ubuntu-latest
     steps:

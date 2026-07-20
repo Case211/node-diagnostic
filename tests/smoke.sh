@@ -65,6 +65,9 @@ echo "== install (диспетчер, без сайд-эффектов) =="
 # help — безопасно (ничего не ставит); неизвестная сабкоманда → rc=2
 bash modules/install.sh help >/dev/null 2>&1 && ok "install help" || bad "install help"
 bash modules/install.sh bogus >/dev/null 2>&1; [ "$?" = "2" ] && ok "install отвергает мусор (rc=2)" || bad "install bogus rc"
+bash modules/shape.sh help >/dev/null 2>&1 && ok "shape help" || bad "shape help"
+bash modules/shape.sh bogus >/dev/null 2>&1; [ "$?" = "2" ] && ok "shape отвергает мусор (rc=2)" || bad "shape bogus rc"
+python3 -c 'import ast; ast.parse(open("modules/shape_ctrl.py").read())' 2>/dev/null && ok "shape_ctrl.py синтаксис" || bad "shape_ctrl.py syntax"
 
 echo "== diagnose --no-net --json → валидный JSON =="
 if command -v python3 >/dev/null 2>&1; then

@@ -42,9 +42,10 @@ usage() {
 node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Remnawave / VPN / Linux).
 
 Команды:
-  diagnose [-q|-v|--no-net]      Диагностика ноды (24 чека, дашборд, вердикт)
-  optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--dry-run]
-                                 Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS clamp
+  diagnose [-q|-v|--no-net]      Диагностика ноды (27 чеков, дашборд, вердикт)
+  optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--irqbalance|--journald|--zram|--dry-run]
+                                 Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS/irqbalance/journald
+                                 --all включает irqbalance+journald; --zram (zram-swap) — только явно
                                  --from-findings — только фиксы по находкам последней диагностики
   protect  [--panel-ip IP] [--node-port N] [--out DIR]
                                  Защита под Remnawave (firewall/fail2ban/SSH) — ГЕНЕРАЦИЯ, не применяет
@@ -54,6 +55,8 @@ node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Re
   status                         Что наложено на систему, ядро, cc/qdisc
   install {node|selfsteal|netbird|monitoring}
                                  Установка ноды Remnawave / Selfsteal / NetBird / мониторинга
+  shape {on|off|status|rule …|wl IP}
+                                 Per-IP шейпер полосы (eBPF/EDT) — лимит DL/UL на клиента
   menu                           Интерактивное меню (по умолчанию в TTY)
   help | --version
 
@@ -65,16 +68,17 @@ menu() {
     while true; do
         banner
         echo
-        echo -e "    ${C}${BOLD}[1]${NC} Диагностика        ${DIM}24 чека, дашборд, вердикт${NC}"
+        echo -e "    ${C}${BOLD}[1]${NC} Диагностика        ${DIM}27 чеков, дашборд, вердикт${NC}"
         echo -e "    ${C}${BOLD}[2]${NC} Оптимизация        ${DIM}sysctl/BBR/FD/RPS/NIC${NC}"
         echo -e "    ${C}${BOLD}[3]${NC} Защита ноды        ${DIM}firewall/fail2ban/SSH (Remnawave, генерация)${NC}"
         echo -e "    ${C}${BOLD}[4]${NC} BBRv3-ядро         ${DIM}XanMod, нужен reboot${NC}"
         echo -e "    ${C}${BOLD}[5]${NC} Откат              ${DIM}снять наложенные оптимизации${NC}"
         echo -e "    ${C}${BOLD}[6]${NC} Статус             ${DIM}что применено, ядро, cc/qdisc${NC}"
         echo -e "    ${C}${BOLD}[7]${NC} Установка Remnanode ${DIM}нода/Selfsteal/NetBird/мониторинг${NC}"
+        echo -e "    ${C}${BOLD}[8]${NC} Шейпер трафика     ${DIM}per-IP лимиты полосы (eBPF)${NC}"
         echo -e "    ${C}${BOLD}[0]${NC} Выход"
         echo
-        printf "  ${BOLD}Выбор${NC} ${DIM}[0-7]${NC}: "
+        printf "  ${BOLD}Выбор${NC} ${DIM}[0-8]${NC}: "
         local c; read -r c
         echo
         case "$c" in
@@ -85,6 +89,7 @@ menu() {
             5) run rollback ;;
             6) show_status ;;
             7) menu_install ;;
+            8) menu_shape ;;
             0|q|"") echo -e "  ${DIM}выход${NC}"; return 0 ;;
             *) echo -e "  ${Y}нет такого пункта${NC}" ;;
         esac
@@ -111,10 +116,11 @@ show_status() {
     local found=0 f
     for f in /etc/sysctl.d/${ND_DROPIN_PREFIX}-*.conf \
              /etc/security/limits.d/99-node-diagnostic.conf \
-             /etc/modules-load.d/${ND_DROPIN_PREFIX}.conf; do
+             /etc/modules-load.d/${ND_DROPIN_PREFIX}.conf \
+             /etc/systemd/journald.conf.d/99-node-diagnostic.conf; do
         [ -e "$f" ] && { box_row "${C_OK}${I_OK}${NC} ${f}"; found=1; }
     done
-    for svc in node-diagnostic-rps node-diagnostic-nic; do
+    for svc in node-diagnostic-rps node-diagnostic-nic node-diagnostic-zram; do
         [ -e "/etc/systemd/system/$svc.service" ] && { box_row "${C_OK}${I_OK}${NC} ${svc}.service"; found=1; }
     done
     if have iptables && iptables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
@@ -136,10 +142,11 @@ show_status() {
 menu_optimize() {
     if [ ! -t 0 ]; then run optimize --all; return; fi
     echo -e "  ${BOLD}Оптимизация${NC}"
-    echo -e "    ${DIM}[a] всё   [f] по находкам диагностики   [d] предпросмотр (dry-run)   [Enter] всё${NC}"
+    echo -e "    ${DIM}[a] всё   [f] по находкам   [z] zram-swap   [d] предпросмотр (dry-run)   [Enter] всё${NC}"
     printf "  выбор: "; local c; read -r c
     case "${c,,}" in
         f) run optimize --from-findings ;;
+        z) run optimize --zram ;;
         d) run optimize --dry-run ;;
         *) run optimize --all ;;
     esac
@@ -204,6 +211,36 @@ menu_install() {
     esac
 }
 
+menu_shape() {
+    if [ ! -t 0 ]; then echo -e "  ${Y}шейпер доступен только в интерактивном режиме${NC}"; return 0; fi
+    echo -e "  ${BOLD}Шейпер трафика${NC} ${DIM}(per-IP лимиты полосы, eBPF)${NC}"
+    echo -e "    ${C}${BOLD}[1]${NC} Включить          ${DIM}собрать BPF + прицепить${NC}"
+    echo -e "    ${C}${BOLD}[2]${NC} Правило           ${DIM}порты + лимит DL/UL на IP${NC}"
+    echo -e "    ${C}${BOLD}[3]${NC} Whitelist +       ${DIM}IP без лимита${NC}"
+    echo -e "    ${C}${BOLD}[4]${NC} Статус / правила"
+    echo -e "    ${C}${BOLD}[5]${NC} Выключить"
+    echo -e "    ${C}${BOLD}[0]${NC} Назад"
+    printf "  ${BOLD}Выбор${NC} ${DIM}[0-5]${NC}: "; local c; read -r c; echo
+    case "$c" in
+        1) run shape on ;;
+        2)
+            local id ports dl ul
+            printf "  ID правила (напр. 1): "; read -r id
+            printf "  порты через запятую (или all): "; read -r ports
+            printf "  лимит DL на IP (Mbit/s): "; read -r dl
+            printf "  лимит UL на IP (Mbit/s): "; read -r ul
+            if [ -n "$id" ] && [ -n "$ports" ] && [ -n "$dl" ] && [ -n "$ul" ]; then
+                run shape rule "$id" "$ports" "$dl" "$ul"
+            else echo -e "  ${Y}не все поля заданы${NC}"; fi
+            ;;
+        3) local ip; printf "  IP в whitelist: "; read -r ip; [ -n "$ip" ] && run shape wl "$ip" ;;
+        4) run shape status ;;
+        5) run shape off ;;
+        0|q|"") return 0 ;;
+        *) echo -e "  ${Y}нет такого пункта${NC}" ;;
+    esac
+}
+
 # ── диспетчер ────────────────────────────────────────────────────────
 cmd="${1:-}"; [ $# -gt 0 ] && shift || true
 case "$cmd" in
@@ -214,6 +251,7 @@ case "$cmd" in
     rollback|revert)       run rollback "$@" ;;
     status|st)             show_status ;;
     install|setup)         run install "$@" ;;
+    shape|shaper)          run shape "$@" ;;
     menu)                  menu ;;
     help|-h|--help)        usage ;;
     --version|-V)          echo "node-diagnostic $ND_VERSION" ;;

@@ -2,6 +2,31 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [4.4.0] — в `main` с 2026-07-20
+
+Per-IP eBPF-шейпер полосы, диагностика «reality over sysctl» и точечный
+сетевой тюнинг. Идеи из ресёрча DonMatteoVPN/Reshala-Remnawave-Bedolaga (MIT)
+и jestivald/node-accelerator.
+
+### Added
+- **Шейпер трафика (`[8]` в меню, команда `shape`, eBPF + EDT)** — per-IP лимиты
+  полосы: каждый клиентский IP получает независимый DL/UL под правилом порта,
+  whitelist обходит шейпинг, опц. dynamic-режим со штраф-рейтом абузеру.
+  `nd-shaper.bpf.c` (clsact: DL=EDT egress, UL=token-bucket ingress) +
+  `shape_ctrl.py` (bpftool) + `shape.sh` (компиляция/attach/persist/rollback).
+  Требует ядро ≥5.4 + clang/bpftool/libbpf-dev. CI собирает BPF (`bpf-compile`).
+- **diagnose: reality-чеки (24→27)** — CPU steal % (оверселл VPS), UDP
+  RcvbufErrors (дропы QUIC/Hysteria2/TUIC), PSI (`/proc/pressure`), accept-queue
+  backlog, а также BBR live-socket, MSS-коллапс по живым сокетам, single-queue
+  NIC — «считаем живое, а не только sysctl».
+- **optimize: irqbalance + journald-cap** (в `--all`), **zram-swap** (opt-in
+  `--zram` / меню `[z]`), sysctl `netdev_budget`/`tcp_ecn=2`/`src_valid_mark=1`,
+  `ethtool -K lro off`.
+
+### Fixed
+- `src_valid_mark=1` рядом с `rp_filter` — иначе строгий reverse-path мог молча
+  ронять исходящий WireGuard/WARP на ноде.
+
 ## [4.3.0] — в `main` с 2026-07-20
 
 Провижининг ноды из меню и надёжный `optimize` на минимальных образах.
