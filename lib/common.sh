@@ -151,6 +151,13 @@ ensure_pkg() {
     have "$1"
 }
 
+# Спросить да/нет (по умолчанию НЕТ). confirm "Текст?" — return 0 при y/yes.
+confirm() {
+    local a
+    echo -en "    ${Y}$1${NC} ${DIM}[y/N]${NC}: "
+    read -r a
+    [ "${a,,}" = "y" ] || [ "${a,,}" = "yes" ]
+}
 msg_ok()   { echo -e "    ${G}${I_OK}${NC} $*"; }
 msg_warn() { echo -e "    ${Y}${I_WARN}${NC} $*"; }
 msg_err()  { echo -e "    ${R}${I_BAD}${NC} $*"; }

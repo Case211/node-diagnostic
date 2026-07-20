@@ -61,6 +61,11 @@ else
     bad "bbr3 install dry-run упал (rc=$rc)"
 fi
 
+echo "== install (диспетчер, без сайд-эффектов) =="
+# help — безопасно (ничего не ставит); неизвестная сабкоманда → rc=2
+bash modules/install.sh help >/dev/null 2>&1 && ok "install help" || bad "install help"
+bash modules/install.sh bogus >/dev/null 2>&1; [ "$?" = "2" ] && ok "install отвергает мусор (rc=2)" || bad "install bogus rc"
+
 echo "== diagnose --no-net --json → валидный JSON =="
 if command -v python3 >/dev/null 2>&1; then
     js=$(bash modules/diagnose.sh --no-net --json 2>/dev/null | tail -n1)
