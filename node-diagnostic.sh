@@ -42,7 +42,7 @@ usage() {
 node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Remnawave / VPN / Linux).
 
 Команды:
-  diagnose [-q|-v|--no-net]      Диагностика ноды (24 чека, дашборд, вердикт)
+  diagnose [-q|-v|--no-net]      Диагностика ноды (27 чеков, дашборд, вердикт)
   optimize [--all|--from-findings|--sysctl|--limits|--rps|--nic|--mss|--dry-run]
                                  Тюнинг: sysctl/BBR/FD-лимиты/RPS-RFS-XPS/NIC/MSS clamp
                                  --from-findings — только фиксы по находкам последней диагностики
@@ -65,7 +65,7 @@ menu() {
     while true; do
         banner
         echo
-        echo -e "    ${C}${BOLD}[1]${NC} Диагностика        ${DIM}24 чека, дашборд, вердикт${NC}"
+        echo -e "    ${C}${BOLD}[1]${NC} Диагностика        ${DIM}27 чеков, дашборд, вердикт${NC}"
         echo -e "    ${C}${BOLD}[2]${NC} Оптимизация        ${DIM}sysctl/BBR/FD/RPS/NIC${NC}"
         echo -e "    ${C}${BOLD}[3]${NC} Защита ноды        ${DIM}firewall/fail2ban/SSH (Remnawave, генерация)${NC}"
         echo -e "    ${C}${BOLD}[4]${NC} BBRv3-ядро         ${DIM}XanMod, нужен reboot${NC}"

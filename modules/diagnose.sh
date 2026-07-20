@@ -418,7 +418,7 @@ check_identify() {
 
 # 2. CPU и нагрузка
 check_cpu() {
-    local nproc model load idle softirq iow
+    local nproc model load idle softirq iow steal
     nproc=$(nproc)
     model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)
     load=$(cut -d' ' -f1 /proc/loadavg)
@@ -436,13 +436,16 @@ check_cpu() {
         softirq=$(echo "$mp" | awk '
             /%soft/ && !c {for(i=1;i<=NF;i++) if($i=="%soft") c=i}
             /^Average:/ && $2=="all" {print $(c?c:8); exit}')
+        steal=$(echo "$mp" | awk '
+            /%steal/ && !c {for(i=1;i<=NF;i++) if($i=="%steal") c=i}
+            /^Average:/ && $2=="all" {print $(c?c:9); exit}')
         echo "$mp"
     else
-        idle="?"; iow="?"; softirq="?"
+        idle="?"; iow="?"; softirq="?"; steal="?"
         cat /proc/loadavg
     fi
 
-    echo "Cores=$nproc  Model=$model  Load=$load  Idle=${idle}%  Softirq=${softirq}%  iowait=${iow}%"
+    echo "Cores=$nproc  Model=$model  Load=$load  Idle=${idle}%  Softirq=${softirq}%  iowait=${iow}%  steal=${steal}%"
 
     summary_kv "CPU" "$nproc cores · $model · load $load"
 
@@ -464,6 +467,17 @@ check_cpu() {
         fi
         if awk -v v="${iow:-0}" 'BEGIN{exit !(v>5)}'; then
             finding 2 cpu "iowait ${iow}% — упор в диск (логи Xray? swap?)"
+        fi
+    fi
+
+    # CPU steal — гипервизор отбирает такты (оверселл/шумный сосед на VPS); в load/idle не видно
+    if [ -n "$steal" ] && [ "$steal" != "?" ]; then
+        if awk -v v="$steal" 'BEGIN{exit !(v>=10)}'; then
+            [ "$RES_STATUS" = "ok" ] && RES_STATUS=warn
+            RES_SUMMARY="$RES_SUMMARY · steal ${steal}%"
+            finding 3 cpu "CPU steal ${steal}% — гипервизор отбирает CPU (оверселл/шумный сосед на VPS), реальный потолок ноды ниже заявленного"
+        elif awk -v v="$steal" 'BEGIN{exit !(v>=3)}'; then
+            finding 1 cpu "CPU steal ${steal}% — лёгкий отбор CPU гипервизором, присматривай"
         fi
     fi
 }
@@ -532,6 +546,11 @@ check_nic() {
         RES_STATUS=warn
         finding 2 nic "TX drops $tx_drops — насыщение исходящего канала / qdisc"
     fi
+
+    # single- vs multi-queue: на single-queue весь RX-softirq на одном ядре → RPS критичен
+    local rxq
+    rxq=$(find /sys/class/net/"$iface"/queues -maxdepth 1 -name 'rx-*' 2>/dev/null | wc -l)
+    [ "${rxq:-0}" = "1" ] && finding 1 nic "NIC single-queue (1 RX-очередь) — весь RX-softirq на одном ядре; RPS/RFS обязательны (optimize их ставит)"
 }
 
 # 4b. Туннели (WireGuard / NetBird / Tailscale / OpenVPN / IPsec)
@@ -630,6 +649,13 @@ check_tcp_cc() {
             finding 2 tcp "qdisc=$qdisc — для BBR нужен fq, для bufferbloat — fq_codel/cake"
             ;;
     esac
+
+    # reality-check: реально ли живые сокеты идут на bbr (а не только sysctl выставлен)
+    if [ "$cc" = "bbr" ] && have ss; then
+        local bbr_live
+        bbr_live=$(ss -tin 2>/dev/null | grep -c bbr)
+        [ "${bbr_live:-0}" = "0" ] && finding 1 tcp "cc=bbr, но активных bbr-сокетов нет — либо нет трафика, либо приложение задаёт свой CC"
+    fi
 }
 
 # 6. TCP tuning
@@ -665,6 +691,13 @@ check_tcp_tuning() {
         [ "$slow_start" = "1" ] && finding 2 tcp "tcp_slow_start_after_idle=1 — после паузы скорость падает в slow-start. Лучше 0"
         [ "$rmem_max" -lt 16777216 ] && finding 2 tcp "rmem_max=$rmem_max < 16M — на гиг-канале мелкое TCP-окно режет скорость"
         [ "${backlog:-0}" -lt 4096 ] && finding 1 tcp "netdev_max_backlog=$backlog — мало под нагрузку, рекомендую 16384"
+    fi
+
+    # reality-check: живые сокеты с коллапсированным send-MSS (<256) = MSS реально схлопывается на потере
+    if have ss; then
+        local mss_low
+        mss_low=$(ss -tin 2>/dev/null | grep -oE 'mss:[0-9]+' | awk -F: '$2<256{c++} END{print c+0}')
+        [ "${mss_low:-0}" -gt 0 ] && finding 2 tcp "$mss_low сокет(ов) с MSS<256 — идёт MSS-коллапс на потере; нужен tcp_mtu_probing=1 + tcp_min_snd_mss≥512 (optimize ставит)"
     fi
 
     summary_kv "TCP tuning" "$RES_SUMMARY"
@@ -1598,16 +1631,79 @@ echo
 DEFAULT_IFACE=$(ip -4 route show default | awk '/default/ {print $5; exit}')
 export DEFAULT_IFACE
 
+# ── доп. локальные health-чеки (reality over sysctl) ─────────────────
+
+# UDP-ошибки приёмного буфера — дропы до приложения (критично для QUIC/Hysteria2/TUIC)
+check_udp_errors() {
+    local rcv=0 snd=0 inerr=0 k v
+    # /proc/net/snmp: пара строк "Udp: <имена>" / "Udp: <значения>"
+    while IFS='=' read -r k v; do
+        case "$k" in RcvbufErrors) rcv=$v;; SndbufErrors) snd=$v;; InErrors) inerr=$v;; esac
+    done < <(awk '/^Udp:/{if(!h){for(i=2;i<=NF;i++)n[i]=$i;h=1;next} for(i=2;i<=NF;i++)printf "%s=%d\n",n[i],$i}' /proc/net/snmp 2>/dev/null)
+    echo "Udp RcvbufErrors=$rcv SndbufErrors=$snd InErrors=$inerr"
+    summary_kv "UDP-ошибки" "rcvbuf $rcv · inerr $inerr"
+    RES_STATUS=ok
+    RES_SUMMARY="rcvbuf $rcv · inerr $inerr"
+    if [ "${rcv:-0}" -gt 1000 ]; then
+        RES_STATUS=warn
+        RES_SUMMARY="RcvbufErrors $rcv ⚠"
+        finding 2 udp "UDP RcvbufErrors=$rcv — приёмный буфер переполняется, дропы до приложения (QUIC/Hysteria2/TUIC теряют пакеты); подними net.core.rmem_max + udp_rmem_min (optimize ставит) или снизь PPS"
+    fi
+    [ "${snd:-0}" -gt 1000 ] && finding 1 udp "UDP SndbufErrors=$snd — переполнение исходящего UDP-буфера"
+}
+
+# PSI — давление ресурсов ядра (/proc/pressure, ядра ≥4.20 с CONFIG_PSI)
+check_psi() {
+    [ -d /proc/pressure ] || { RES_STATUS=skip; RES_SUMMARY="нет PSI (ядро <4.20 / CONFIG_PSI выкл)"; return; }
+    local c m io r a10
+    for r in cpu memory io; do
+        [ -f "/proc/pressure/$r" ] || continue
+        a10=$(awk '/^some/{for(i=1;i<=NF;i++)if($i ~ /^avg10=/){sub("avg10=","",$i);print $i;exit}}' "/proc/pressure/$r")
+        case "$r" in cpu) c=$a10;; memory) m=$a10;; io) io=$a10;; esac
+    done
+    echo "PSI some avg10 — cpu=${c:-?} mem=${m:-?} io=${io:-?}"
+    summary_kv "PSI avg10" "cpu ${c:-?} · mem ${m:-?} · io ${io:-?}"
+    RES_STATUS=ok
+    RES_SUMMARY="cpu ${c:-0} · mem ${m:-0} · io ${io:-0}"
+    local pair nm vv
+    for pair in "cpu:${c:-0}" "mem:${m:-0}" "io:${io:-0}"; do
+        nm=${pair%:*}; vv=${pair#*:}
+        if awk -v v="$vv" 'BEGIN{exit !(v>=10)}'; then
+            RES_STATUS=warn
+            finding 2 svc "PSI $nm avg10=${vv}% — ядро заметно «стоит» в ожидании $nm под нагрузкой"
+        fi
+    done
+}
+
+# Accept-queue backlog — приложение (xray/агент) не успевает принимать коннекты
+check_backlog() {
+    have ss || { RES_STATUS=skip; RES_SUMMARY="нет ss (iproute2)"; return; }
+    # ss -tlnH: у LISTEN recv-q($2)=текущая заполненность accept-queue, send-q($3)=её лимит
+    local full
+    full=$(ss -tlnH 2>/dev/null | awk '$1=="LISTEN" && $3+0>0 && $2+0>=$3+0 {print $4"(q="$2"/"$3")"}' | head -5 | tr '\n' ' ')
+    RES_STATUS=ok
+    if [ -n "$full" ]; then
+        RES_STATUS=warn
+        RES_SUMMARY="accept-queue переполнена"
+        finding 2 svc "Accept-queue заполнена до лимита: $full — приложение не успевает принимать коннекты (подними somaxconn + backlog самого приложения)"
+    else
+        RES_SUMMARY="accept-queue в норме"
+    fi
+    summary_kv "Accept-queue" "$RES_SUMMARY"
+}
+
 # Регистрируем чек-лист
 CHECKS=(
     "Идентификация:check_identify"
     "CPU и нагрузка:check_cpu"
     "Память:check_mem"
+    "PSI (давление):check_psi"
     "NIC / интерфейс:check_nic"
     "Туннели:check_tunnel"
     "TCP congestion:check_tcp_cc"
     "TCP tuning:check_tcp_tuning"
     "Conntrack:check_conntrack"
+    "UDP-ошибки:check_udp_errors"
     "DNS-резолв:check_dns"
     "PMTU:check_pmtu"
     "Loss до Google:check_loss"
@@ -1621,6 +1717,7 @@ CHECKS=(
     "Bufferbloat:check_bufferbloat"
     "Sustained variance:check_variance"
     "TCP retransmits:check_tcp_stats"
+    "Accept-queue:check_backlog"
     "IPv6:check_ipv6"
     "Xray:check_xray"
     "Открытые порты:check_listen"
