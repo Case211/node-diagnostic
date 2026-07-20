@@ -55,6 +55,8 @@ node-diagnostic.sh v$ND_VERSION — модульный тулкит ноды (Re
   status                         Что наложено на систему, ядро, cc/qdisc
   install {node|selfsteal|netbird|monitoring}
                                  Установка ноды Remnawave / Selfsteal / NetBird / мониторинга
+  shape {on|off|status|rule …|wl IP}
+                                 Per-IP шейпер полосы (eBPF/EDT) — лимит DL/UL на клиента
   menu                           Интерактивное меню (по умолчанию в TTY)
   help | --version
 
@@ -73,9 +75,10 @@ menu() {
         echo -e "    ${C}${BOLD}[5]${NC} Откат              ${DIM}снять наложенные оптимизации${NC}"
         echo -e "    ${C}${BOLD}[6]${NC} Статус             ${DIM}что применено, ядро, cc/qdisc${NC}"
         echo -e "    ${C}${BOLD}[7]${NC} Установка Remnanode ${DIM}нода/Selfsteal/NetBird/мониторинг${NC}"
+        echo -e "    ${C}${BOLD}[8]${NC} Шейпер трафика     ${DIM}per-IP лимиты полосы (eBPF)${NC}"
         echo -e "    ${C}${BOLD}[0]${NC} Выход"
         echo
-        printf "  ${BOLD}Выбор${NC} ${DIM}[0-7]${NC}: "
+        printf "  ${BOLD}Выбор${NC} ${DIM}[0-8]${NC}: "
         local c; read -r c
         echo
         case "$c" in
@@ -86,6 +89,7 @@ menu() {
             5) run rollback ;;
             6) show_status ;;
             7) menu_install ;;
+            8) menu_shape ;;
             0|q|"") echo -e "  ${DIM}выход${NC}"; return 0 ;;
             *) echo -e "  ${Y}нет такого пункта${NC}" ;;
         esac
@@ -207,6 +211,36 @@ menu_install() {
     esac
 }
 
+menu_shape() {
+    if [ ! -t 0 ]; then echo -e "  ${Y}шейпер доступен только в интерактивном режиме${NC}"; return 0; fi
+    echo -e "  ${BOLD}Шейпер трафика${NC} ${DIM}(per-IP лимиты полосы, eBPF)${NC}"
+    echo -e "    ${C}${BOLD}[1]${NC} Включить          ${DIM}собрать BPF + прицепить${NC}"
+    echo -e "    ${C}${BOLD}[2]${NC} Правило           ${DIM}порты + лимит DL/UL на IP${NC}"
+    echo -e "    ${C}${BOLD}[3]${NC} Whitelist +       ${DIM}IP без лимита${NC}"
+    echo -e "    ${C}${BOLD}[4]${NC} Статус / правила"
+    echo -e "    ${C}${BOLD}[5]${NC} Выключить"
+    echo -e "    ${C}${BOLD}[0]${NC} Назад"
+    printf "  ${BOLD}Выбор${NC} ${DIM}[0-5]${NC}: "; local c; read -r c; echo
+    case "$c" in
+        1) run shape on ;;
+        2)
+            local id ports dl ul
+            printf "  ID правила (напр. 1): "; read -r id
+            printf "  порты через запятую (или all): "; read -r ports
+            printf "  лимит DL на IP (Mbit/s): "; read -r dl
+            printf "  лимит UL на IP (Mbit/s): "; read -r ul
+            if [ -n "$id" ] && [ -n "$ports" ] && [ -n "$dl" ] && [ -n "$ul" ]; then
+                run shape rule "$id" "$ports" "$dl" "$ul"
+            else echo -e "  ${Y}не все поля заданы${NC}"; fi
+            ;;
+        3) local ip; printf "  IP в whitelist: "; read -r ip; [ -n "$ip" ] && run shape wl "$ip" ;;
+        4) run shape status ;;
+        5) run shape off ;;
+        0|q|"") return 0 ;;
+        *) echo -e "  ${Y}нет такого пункта${NC}" ;;
+    esac
+}
+
 # ── диспетчер ────────────────────────────────────────────────────────
 cmd="${1:-}"; [ $# -gt 0 ] && shift || true
 case "$cmd" in
@@ -217,6 +251,7 @@ case "$cmd" in
     rollback|revert)       run rollback "$@" ;;
     status|st)             show_status ;;
     install|setup)         run install "$@" ;;
+    shape|shaper)          run shape "$@" ;;
     menu)                  menu ;;
     help|-h|--help)        usage ;;
     --version|-V)          echo "node-diagnostic $ND_VERSION" ;;

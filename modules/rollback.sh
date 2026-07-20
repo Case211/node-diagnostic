@@ -96,6 +96,7 @@ rollback_all() {
     echo -e "  ${DIM}Не входит в откат:${NC}"
     echo -e "  ${DIM}  · XanMod-ядро → ${BOLD}sudo apt purge 'linux-xanmod*' && sudo update-grub && reboot${NC}"
     echo -e "  ${DIM}  · firewall/fail2ban/sshd → они generate-only, откат в их APPLY.txt${NC}"
+    echo -e "  ${DIM}  · eBPF-шейпер → снимается отдельно: ${BOLD}node-diagnostic.sh shape off${NC}"
     echo -e "  ${DIM}  · sysctl-бэкапы дампов лежат в $BACKUP_DIR${NC}"
 }
 
